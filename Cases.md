@@ -95,6 +95,250 @@ C code中更好办法在这个问题里实际上是output oriented的
 
 
 
+### Cutoff Biomolecules
+
+> Reference
+>
+> 1. UIUC ECE 508 Lecture 5,6
+
+
+
+是什么：忽略atoms contributiuon to grid point beyound cutoff distance C
+
+这样大约有200-700 atoms within cutoff sphere for each grid point，这样对于每一个grid point就只有constant number of atom that's relavent
+
+对于每一个thread/grid point，只需要examine atoms within cutoff radious
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 6.33.30 PM.png" alt="Screen Shot 2022-07-13 at 6.33.30 PM" style="zoom:50%;" />
+
+
+
+smoothing function：在计算atom对于grid point的作用的时候，使用一个smoothing function避免在cutoff boundary的地方的点是0/1这样的切换
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 6.36.26 PM.png" alt="Screen Shot 2022-07-13 at 6.36.26 PM" style="zoom:50%;" />
+
+
+
+#### Constant bin
+
+把atom放到bin中
+
+每个bin的property是这个bin的spatial location
+
+每个bin有自己的unique index for O(1) parallel access
+
+每个bin包含多个atom，bin中的每个atom有自己独立的位置
+
+这是一种改变input data structure从而improve performence的方法
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 6.40.18 PM.png" alt="Screen Shot 2022-07-13 at 6.40.18 PM" style="zoom:50%;" />
+
+使用single overflow bin on cpu储存全部的overflow atom
+
+
+
+* 选择constant bin capacity
+
+每个thread block负责计算一个bin。这里假设每个bin放几个atom的大小与threads block负责的大小是一样的，都是bin capacity所对应的spatial location
+
+一般选择bin capacity从而允许align & coarlesed memory access
+
+一般选择capacity从而让95%的atom都在bin里，只有5%的在overflow bin里
+
+如果bin capacity太大，需要过多的dummy atom in bin，同时thread需要检查很多atoms out of range（得到bin了以后，依旧要检查range）
+
+如果bin capacity太小，过多的atom在overflow bin中，同时not enough grid points within bin 导致无法充分利用threads block（启动一个16 threads的threads block是不划算的）
+
+选择每个bin包含8 x 8 x 8个grid points。4 grid points per thread。128 thread block cover one bin
+
+也需要有足够的thread block per sm（也就是总threads block数量要多，每个threads block不要过大），因为load nbr bin data from global memory to shared memory花费很多时间，需要有足够的threads block才能够成功的hide latency，一般选择 >= 4 threads block per sm
+
+每个constant size bin储存8 atoms，每个bin占用128 bytes的数据
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 8.58.05 PM.png" alt="Screen Shot 2022-07-13 at 8.58.05 PM" style="zoom:50%;" />
+
+
+
+* 使用constant bin的优点
+
+可以使用array储存bin中atoms
+
+可以使用relative bin offset来访问数据。neighbour bin offset是个复杂的计算，可以在cpu上计算一次，放在constant memory上，然后在gpu上使用
+
+
+
+* 实现
+
+load nbr bin data (constant size atom array) from global memory to shared memory
+
+every threads in bin examine nbr bin data in shared memory
+
+all threads inside thread block examine supersphere（全部蓝色格子画一个内切圆）。绿色的左上角的grid point对应着左上的circle，绿色的右下角的grid point对应右下的circle，左上的circle并不涉及super sphere中全部的bin，但是要一起查看是否within cuttoff。
+
+每一个bin，有8x8x8=512 grid points，每个thread处理4个grid point，每个bin/thread block有128 threads
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 8.39.55 PM.png" alt="Screen Shot 2022-07-13 at 8.39.55 PM" style="zoom:50%;" />
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 8.41.23 PM.png" alt="Screen Shot 2022-07-13 at 8.41.23 PM" style="zoom:50%;" />
+
+
+
+* 适用data
+
+如果atom is uniform，这样每个bin中的atom也就是uniform的，减少divergence & wasted memory
+
+
+
+* efficency
+
+使用上面的configuration，只有34% exampined的atom是within cutoff distance的，之所以这么低是因为
+
+1. 每个grid point涉及到的nbr bin只是全部检查的nbr bin（蓝色部分）的一部分
+2. 每个bin里面有dummy atom
+3. 有些bin只与cutoff相切了一点，但是整个bin内的atom需要被examine if within cutoff
+
+对于每一个bin，一次处理8x8x8个grid size，也就是8x8x8的reuse。
+
+
+
+* CPU GPU 工作分配
+
+host：把atom分配到对应的bin中，产生nbr bin offset，当结果从gpu拷贝回来以后负责计算overflow bin中的数据
+
+device：对于每个bin，测试nbr bin中全部的atom
+
+
+
+* memory access optimization
+
+shared memory放一个nbr bin：每个bin使用128 bytes的数据，可以使用32 threads，每个thread load 4 bytes，从而coarlesed memory load。
+
+这种方法的warp divergence：每个thread block有4个warp，当第一个warp内的thread来负责load data into shared memory，剩下3个thread不运行对应的if branch没有warp divergence（只有额外的if branch instruction overhead），但是由于有syncthread barrier，需要有其余的warp来运行来hide latency
+
+
+
+shared memory放4个nbr bin：全部128 threads within block load 4 bytes data，coarlesed memory access & 没有branch divergence。
+
+但是由于使用了更多的share memory ，可能导致一个sm能够放心的threads block数量减少，当前不太会是问题因为只要512 bytes per block
+
+但是由于一次load更多的数据到shared memory中，导致latency更多，需要更多的threads block per sm来hide latency。
+
+
+
+threads coarlesed方向：每个thread负责4个grid point，这4个grid point需要是Y/Z方向的连续4个点，不能是X方向的连续4个grid point。因为grid point data是以X Y Z为单位储存，也就是连续的x数据是连续储存在一起的，don't coarsen in smallest linearization dimention of data unless locality doesn't matter。如果一个thread负责4个连续的x方向grid point，则连续的threads会访问不连续的memmory
+
+
+
+当遇到当前bin的第一个dummy atom，则break，然后检查下一个bin
+
+
+
+* ILP
+
+注意：很多HPC engineer都忽视优化中ILP的作用，只关注memory的优化，这是不好的，因为instruction pipeline 的pressure也会是原因
+
+对于每个threads负责的4个grid point，首先计算dx2 dz2，运行cylinder test来检查4个grid point是否在cutoff radious内（被4个grid point共享），如果成功的话再测试y。
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 9.35.20 PM.png" alt="Screen Shot 2022-07-13 at 9.35.20 PM" style="zoom:50%;" />
+
+在pass cylinder test后，对于thread负责的4个grid point，分辨计算dy2，然后check if within cutoff distance
+
+
+
+不要启动过多的threads block，大约4 threads block per sm足够keep sm busy就好了。对于每个thread block，当计算完当前bin的数据以后，就计算下一个bin，直到全部的bin都被处理完。
+
+
+
+#### Parallel binning
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 9.47.39 PM.png" alt="Screen Shot 2022-07-13 at 9.47.39 PM" style="zoom:50%;" />
+
+
+
+因为per atom idx只会在step2里使用，所以不需要write to memory然后再load from memory，可以使用kernel fusion
+
+因为使用kernel fusion的方法，copy atom to bin的latency被atomic等待 hide掉了。尽管write to bin并没有coarlesed
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 9.49.52 PM.png" alt="Screen Shot 2022-07-13 at 9.49.52 PM" style="zoom:50%;" />
+
+
+
+在binning结束以后，得到bin以及bin count。
+
+在使用gpu计算最终结果的时候，是使用bin count，还是检查dummy atom，是一个需要选择的。使用bin count代表需要load extra data，有些时候不如检查dummy atom
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.11.06 PM.png" alt="Screen Shot 2022-07-13 at 10.11.06 PM" style="zoom:50%;" />
+
+
+
+* 处理overflow bin
+
+如果atom count > capacity，atomically reduce atomic count，place data in overflow list。
+
+这样做的缺点是如果有一些unbalance，就会导致某一个bin的atom特别多，很多的atomic recrease
+
+
+
+减少atomic的使用。
+
+1. read counter value，如果too large的话，则放到overflow list里，这一步不涉及atomic decrease
+2. 如果读到的值没有过大，使用atomic add
+
+这样避免了很多atomic add + atomic decrease
+
+
+
+* 实现
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.03.38 PM.png" alt="Screen Shot 2022-07-13 at 10.03.38 PM" style="zoom:50%;" />
+
+
+
+#### Dynamic binning
+
+* dummy atom的问题
+
+浪费了global memory bandwidth，shared memory storage，compute cycle to identify dummy atom
+
+
+
+* 得到dynamic binning
+
+1. (对于每个bin，计算atom relative idx)
+2. 对于每个bin，保存bin count
+3. 通过prefix sum on bin count, 得到bin start location
+4. 对于每个atom，通过bin start location与relative idx（也可以现在run time产生）进行数据拷贝
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.17.49 PM.png" alt="Screen Shot 2022-07-13 at 10.17.49 PM" style="zoom:50%;" />
+
+
+
+* 使用dynamic binning计算
+
+之前使用constant bin的时候，对于每个bin储存nbr bin的relative offset （这个relative offset shared by all bin)。
+
+现在使用dynamic binning的时候，储存pencil的数据。
+
+需要注意依旧要tile access to atom。
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.26.20 PM.png" alt="Screen Shot 2022-07-13 at 10.26.20 PM" style="zoom:50%;" />
+
+
+
+* avoid load imbalance
+
+为了避免某一个特定的bin有很多的atom，从而导致load imbalance。设定max num atom in bin + 使用overflow list
+
+cpu在overflow list上进行计算
+
+只要在某个方位内，max num atom in bin对perf的影响不是很大
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.20.57 PM.png" alt="Screen Shot 2022-07-13 at 10.20.57 PM" style="zoom:50%;" />
+
+
+
+
+
 ### 7 point Stencil
 
 stencil难点: memory intense & little computation (one fma per load value)
@@ -177,7 +421,7 @@ stencil难点: memory intense & little computation (one fma per load value)
 
 
 
-### GEMM
+### GEMM C=AB
 
 > Reference
 >
@@ -219,12 +463,15 @@ void GEMM(float* M, float* N, float* P, int width)
 __global__ 
 void MatrixKernel( float* d_M, float* d_N, float* d_P, int width )
 {
+  // each thread corr to one output location defined by (row, col)
+  // each thread read in row of M and col of N
   int row = blockIdx.y * blockDim.y + threadIdx.y;
   int col = blockIdx.x * blockDim.x + threadIdx.x;
 
   if ( ( row < width ) && ( col < width ) )
   {
-    float pval = 0;
+    // 使用suffix f来避免implicit type conversion
+    float pval = 0.0f;
     for ( int k = 0; k < width; ++k )
     {
       pval += d_M[ row * width + k ] * d_N[ k * width + col ]; // access global memory
@@ -264,7 +511,121 @@ Load 1 N 1 M element : 4 bytes each, total 8 bytes
 
 
 
-#### Tile with shared memory
+#### Simple Blocked CUDA Code
+
+>  Reference
+>
+> 1. CUDA C++ best practice guide chapter 9.2.3.2
+
+
+
+* 假设
+
+这个方法的假设与其余gemm的有一些不一样。主要目的是为了说明shared memory的作用
+
+w : warp size
+
+A of dimension Mxw, B of dimension wxN, and C of dimension MxN
+
+use a block and tile size of wxw threads.
+
+A grid of N/w by M/w blocks is launched
+
+Each thread block of size wxw calculates the elements of a different tile in C from a single tile of A and a single tile of B.
+
+Each thread in the wxw-thread block calculates one element in a tile of C
+
+
+
+<img src="Note.assets/Screen Shot 2022-06-28 at 10.28.40 PM.png" alt="Screen Shot 2022-06-28 at 10.28.40 PM" style="zoom:50%;" />
+
+* Code
+
+```cpp
+__global__ void simpleMultiply(float *a, float* b, float *c, int N)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float sum = 0.0f;
+    for (int i = 0; i < TILE_DIM; i++) {
+      sum += a[row*TILE_DIM+i] * b[i*N+col];
+    }
+    c[row*N+col] = sum;
+}
+```
+
+
+
+* analysis 
+
+Each warp of threads calculates one row of a tile of C, which depends on a single row of A and an entire tile of B as illustrated in Figure 12.
+
+<img src="Note.assets/Screen Shot 2022-06-28 at 10.52.32 PM.png" alt="Screen Shot 2022-06-28 at 10.52.32 PM" style="zoom:50%;" />
+
+For each iteration i of the for loop, the threads in a warp read a row of the B tile
+
+对于B的global memory read是coarlesed，因为每个iteration threads读取连续的B的内存
+
+
+
+For each iteration i, all threads in a warp read the same value from global memory for matrix A
+
+对于A的global memory read是waste bandwidth的（假设cc 5.x+)，因为每一次memory transaction会传送32 bytes data，但是只使用了4 bytes (size of one float)。由于有很多的warp在运行，所以这个memory transaction不会成功的保存在cache line里，而是会被eciction。
+
+
+
+#### Tiling shared memory for A
+
+>  Reference
+>
+>  1. CUDA C++ best practice guide chapter 9.2.3.2
+
+
+
+* 假设
+
+继续上面的`Simple Block CUDA Code`的假设。
+
+但是这里只对一个input使用tile并且只用syncwarp的想法可以扩展到其余的tile with shared memory
+
+
+
+* Code
+
+```cpp
+__global__ void coalescedMultiply(float *a, float* b, float *c, int N)
+{
+  // TILE_DIM = 32
+    __shared__ float aTile[TILE_DIM][TILE_DIM];
+
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float sum = 0.0f;
+    aTile[threadIdx.y][threadIdx.x] = a[row*TILE_DIM+threadIdx.x];
+    __syncwarp();
+    for (int i = 0; i < TILE_DIM; i++) {
+        sum += aTile[threadIdx.y][i]* b[i*N+col];
+    }
+    c[row*N+col] = sum;
+}
+
+```
+
+
+
+* analysis
+
+因为使用了shared memory，warp内的每个thread访问连续的gloabl memory address放到shared memory上
+
+这里使用syncwarp因为only threads within the warp that write the data into shared memory read this data. 每个warp内的thread只会用(read)到one row of tile of A, 而这部分数据只会被当前的warp写入
+
+注意，尽管这里shared memory A是 `[32][32]` ，但是对于shared memory的访问是stride1的，所以不存在bank conflict
+
+
+
+#### Tiling shared memory for A&B / M&N
+
+* 假设
 
 假设 M N P 是 square matrix
 
@@ -286,9 +647,13 @@ grid size in 2D of ceil( width / TILE_WIDTH ) * ceil( width / TILE_WIDTH )
 
 
 
+* code
+
 假设square tile + square matrix的情况。每一个thread会负责load 1 M elem，load 1 N elem，write 1 P elem
 
 当使用了shared memory的时候，第一个想法就是注意需要有synchronize
+
+这里因为 a warp reads data from shared memory that were written to shared memory by different warps.  所以不能再使用syncwarp，只能使用syncthread
 
 **对于每一个M N中的input数据，通过tile的方法，被复用TILE_WIDTH次。**
 
@@ -333,6 +698,27 @@ __global__ void SquareMatrixKernel1( float* d_M, float* d_N, float* d_P, int wid
 
 
 
+simple kernel 对应上面的case
+
+```cpp
+__global__ void sharedABMultiply(float *a, float* b, float *c,int N)
+{
+    __shared__ float aTile[TILE_DIM][TILE_DIM],
+                     bTile[TILE_DIM][TILE_DIM];
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float sum = 0.0f;
+    aTile[threadIdx.y][threadIdx.x] = a[row*TILE_DIM+threadIdx.x];
+    bTile[threadIdx.y][threadIdx.x] = b[threadIdx.y*N+col];
+    __syncthreads();
+    for (int i = 0; i < TILE_DIM; i++) {
+        sum += aTile[threadIdx.y][i]* bTile[i][threadIdx.x];
+    }
+    c[row*N+col] = sum;
+}
+
+```
+
 
 
 * bandwidth 分析
@@ -346,6 +732,12 @@ __global__ void SquareMatrixKernel1( float* d_M, float* d_N, float* d_P, int wid
 可以做到150 / 4 * 32 = 1200 GFLOPS > 1000 GFLOPS
 
 内存带宽不再是限制。
+
+
+
+* bank 分析
+
+注意，尽管这里shared memory B是 `[32][32]` ，但是对于shared memory的访问是stride1的，每个warp负责one row （而不是每个thread in one warp负责one row)，所以不存在bank conflict
 
 
 
@@ -483,6 +875,304 @@ reuse tile from matrix M for multipel tile N
 `DenseLinearAlgebra-CommunicationLowerBound.md::GEMM-UIUC` 没有考虑这个部分。
 
 <img src="Note.assets/Screen Shot 2022-05-31 at 7.07.46 PM.png" alt="Screen Shot 2022-05-31 at 7.07.46 PM" style="zoom:50%;" />
+
+
+
+### GEMM C=AA^T
+
+> Reference
+>
+> 1. CUDA C++ Best practice guide 9.2.3.3
+
+
+
+#### Simple Blocked CUDA Code
+
+* assumption
+
+同`GEMM C=AB Simple Blocked CUDA Code`
+
+
+
+* code
+
+```cpp
+__global__ void simpleMultiply(float *a, float *c, int M)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float sum = 0.0f;
+    for (int i = 0; i < TILE_DIM; i++) {
+        sum += a[row*TILE_DIM+i] * a[col*TILE_DIM+i];
+    }
+    c[row*M+col] = sum;
+}
+
+```
+
+
+
+* analysis
+
+每个iteration，threads in warp对于A^T的访问是strided access with stride of w (A is size Mxw)，导致了waste bandwidth
+
+
+
+#### Tiling shared memory
+
+* code
+
+```cpp
+__global__ void coalescedMultiply(float *a, float *c, int M)
+{
+    __shared__ float aTile[TILE_DIM][TILE_DIM],
+                     transposedTile[TILE_DIM][TILE_DIM];
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float sum = 0.0f;
+    aTile[threadIdx.y][threadIdx.x] = a[row*TILE_DIM+threadIdx.x];
+    transposedTile[threadIdx.x][threadIdx.y] = a[(blockIdx.x*blockDim.x + threadIdx.y)*TILE_DIM +threadIdx.x];  
+    __syncthreads();
+    for (int i = 0; i < TILE_DIM; i++) {
+        sum += aTile[threadIdx.y][i]* transposedTile[i][threadIdx.x];
+    }
+    c[row*M+col] = sum;
+}
+
+```
+
+
+
+* analysis
+
+The reads of elements in transposedTile within the for loop are free of conflicts, because threads of each half warp read across rows of the tile, resulting in unit stride across the banks. 读取的时候不存在bank conflict，因为threads within warp读取row of tile. 
+
+bank conflicts occur when copying the tile from global memory into shared memory. 从global memory到shared memory的时候存在bank conflict，注意transposed shared memory是 `transposedTile[threadIdx.x][threadIdx.y]` 的方式访问的，这也就意味着threads in same warp会负责different row of tile + same col of tile. 
+
+因为shared memory是 32 * 32 的，这也就意味着一个warp内全部的thread都是以stride 32来访问的，导致32-way bank conflict. 
+
+
+
+#### Avoid shared memory bank conflict
+
+
+
+* improvement
+
+通过更改static allocated shared memory dim, 从而让shared memory stride 33 of 32 bits access, 避免了bank conflict
+
+```cpp
+__shared__ float transposedTile[TILE_DIM][TILE_DIM+1];
+```
+
+
+
+* 为什么不可以改变读取global memory来避免bank conflict
+
+因为这样的话对于global memory的读取就不是coarlesed的，所以只能改变如何储存shared memory
+
+
+
+### SpMV
+
+> Reference
+>
+> 1. UIUC ECE 408 Lecture 19, 20
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.51.39 PM.png" alt="Screen Shot 2022-07-13 at 10.51.39 PM" style="zoom:50%;" />
+
+* 特点
+
+1. irregular input data 
+2. little or no data reuse
+3. compiler 很难优化
+
+
+
+#### CSR
+
+* data format
+
+1. row pointer (index)：每个row储存的col idx/data的start position
+2. nonzero data：每个row所对应的nonzero data
+3. col idx：每个nonzero data对应的col
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.52.47 PM.png" alt="Screen Shot 2022-07-13 at 10.52.47 PM" style="zoom:50%;" />
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.52.55 PM.png" alt="Screen Shot 2022-07-13 at 10.52.55 PM" style="zoom:50%;" />
+
+
+
+* 计算
+
+每个thread负责一个row
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.53.08 PM.png" alt="Screen Shot 2022-07-13 at 10.53.08 PM" style="zoom:50%;" />
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 10.54.41 PM.png" alt="Screen Shot 2022-07-13 at 10.54.41 PM" style="zoom:50%;" />
+
+
+
+* 特点
+
+1. warp divergence, 一个warp内的thread由于负责不同的row，有不同的nonzero element，需要for loop运行的次数不一样
+2. 没有coarlesed memory read，每个thread access random and non-adjacent memory location
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 11.03.34 PM.png" alt="Screen Shot 2022-07-13 at 11.03.34 PM" style="zoom:50%;" />
+
+
+
+block performence由longest row决定。导致不同block所花费的时间也是不一样的
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 11.13.44 PM.png" alt="Screen Shot 2022-07-13 at 11.13.44 PM" style="zoom:50%;" />
+
+
+
+#### ELL
+
+* data format
+
+1. nonzero padded transposed data
+2. column idx padded transposed 一一对应（1）中的数据
+
+
+
+* 特点
+
+1. pad row with 0 从而让每个thread的amount of work相同
+2. transpose input data从而coarlesed memory access
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 11.05.00 PM.png" alt="Screen Shot 2022-07-13 at 11.05.00 PM" style="zoom:50%;" />
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 11.05.10 PM.png" alt="Screen Shot 2022-07-13 at 11.05.10 PM" style="zoom:50%;" />
+
+
+
+* 实现
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 11.05.24 PM.png" alt="Screen Shot 2022-07-13 at 11.05.24 PM" style="zoom:50%;" />
+
+
+
+#### COO
+
+* 数据
+
+1. nonzero data
+2. 每一个nonzero data对应的col & row idx
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 11.07.43 PM.png" alt="Screen Shot 2022-07-13 at 11.07.43 PM" style="zoom:50%;" />
+
+
+
+* 特点
+
+可以reorder nonzero data，因为explicitly store row & col
+
+不常完全使用COO format，因为parallel的时候需要使用atomic来更新数据。
+
+
+
+* 实现
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 11.08.33 PM.png" alt="Screen Shot 2022-07-13 at 11.08.33 PM" style="zoom:50%;" />
+
+
+
+parallel的时候
+
+1. 按照num elem / num thread 切分就可以
+2. 需要使用atomic来更新
+
+
+
+#### Hybrid ELL + COO
+
+* data
+
+使用ELL处理绝大多数element
+
+使用COO处理额外的数据，从而避免ELL的dummy value 太多
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 11.12.43 PM.png" alt="Screen Shot 2022-07-13 at 11.12.43 PM" style="zoom:50%;" />
+
+
+
+* 实现
+
+使用device来计算ELL
+
+使用host来计算COO
+
+
+
+#### JDS
+
+* 是什么
+
+sort row into descending order基于num nonzero + keep track of original row number
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 4.39.04 PM.png" alt="Screen Shot 2022-07-14 at 4.39.04 PM" style="zoom:50%;" />
+
+
+
+* JDS + CSR
+
+在sorted 版本上运行CSR，可以让临近的thread有相似的num nonzero element，从而减少warp divergence on number of for loop iteration
+
+adjacent thread依旧访问non-adjacent memory location，无法coarlesed memory access
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 4.39.20 PM.png" alt="Screen Shot 2022-07-14 at 4.39.20 PM" style="zoom:50%;" />
+
+
+
+
+
+* JDS + CSR + Transpose
+
+通过transpose储存，是的thread访问内存的时候连续访问
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 4.40.44 PM.png" alt="Screen Shot 2022-07-14 at 4.40.44 PM" style="zoom:50%;" />
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 4.42.29 PM.png" alt="Screen Shot 2022-07-14 at 4.42.29 PM" style="zoom:50%;" />
+
+
+
+#### Summary
+
+在什么情况下使用什么format
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 4.42.48 PM.png" alt="Screen Shot 2022-07-14 at 4.42.48 PM" style="zoom:50%;" />
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 4.42.59 PM.png" alt="Screen Shot 2022-07-14 at 4.42.59 PM" style="zoom:50%;" />
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 4.43.22 PM.png" alt="Screen Shot 2022-07-14 at 4.43.22 PM" style="zoom:50%;" />
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 4.43.34 PM.png" alt="Screen Shot 2022-07-14 at 4.43.34 PM" style="zoom:50%;" />
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 4.43.45 PM.png" alt="Screen Shot 2022-07-14 at 4.43.45 PM" style="zoom:50%;" />
+
+
+
+* 其余的sparse matrix format
+
+1. DIA ： 用于strictly diagonal matrics
+2. PKT : 通过reordering row col得到diagnoal matrix
+3. DOK
+4. CSC
+5. Blocked CSR ：大部分sparse，有多个小部分是dense的 
 
 
 
@@ -750,6 +1440,8 @@ reduction ratio for different tile size and tile width
 >
 > 1. UIUC 408 Lecture 18
 > 2. Programming Massively Parallel Processors 3rd edition Chapter 9
+
+
 
 histogram中有highly contentious output conflict，每个thread都有很多的写
 

@@ -26,9 +26,7 @@
 
 
 
-## Computation Capacity & Memory
-
-## Computation Capacity & Instruction
+## Computation Capacity
 
 > Reference
 >
@@ -566,6 +564,8 @@ CPU thread1有自己的cache，CPU thread2有自己的cache，这两个cache不�
 
 因为GPU有较小的cache，一个SM内的多个thread会共享L1 cache。对GPU的连续内存访问需要以warp为单位进行考虑。warp内的32个thread是否访问连续的32个内存空间。
 
+when many warps execute on the same multiprocessor simultaneously, as is generally the case, the cache line may easily be evicted from the cache between iterations i and i+1. CUDA中充分利用bandwidth需要warp内的threads在某一个iteration/timestep内花费全部transaction data segment / cache line， 因为有很多warp同时在sm上运行，等下一个iteration的时候 cache line/DRAM buffer已经被清空了。
+
 
 
 * Compute capacity 6.0+
@@ -631,6 +631,12 @@ if the size of the words accessed by each thread is more than 4 bytes, a memory 
 * memory request to cache line request
 
 每个memory request is then broken down into cache line request, issue independently. 
+
+
+
+* 不是很确定下面的部分，还需要确定
+
+当一个内存事务的首个访问地址是缓存粒度（32或128字节）的偶数倍的时候：比如二级缓存32字节的偶数倍64，128字节的偶数倍256的时候，这个时候被称为对齐内存访问，非对齐访问就是除上述的其他情况，非对齐的内存访问会造成带宽浪费。
 
 
 
@@ -814,163 +820,6 @@ host memory -> device global memory 的拷贝是有overhead的。
 
 
 
-## Page-locked host memory & Async exec
-
-### Pinned Memory
-> Reference
->
-> 1. NVIDIA Tech Blog How to Optimize Data Transfers in CUDA C/C++ [link](https://developer.nvidia.com/blog/how-optimize-data-transfers-cuda-cc/)
->    1. 包含了一个memory bandwidth test的代码
-> 2. Stackoverflow Why is CUDA pinned memory so fast? [link](https://stackoverflow.com/questions/5736968/why-is-cuda-pinned-memory-so-fast)
-
-
-
-#### Sync copy
-
-* 内存拷贝时发生了什么
-
-Host (CPU) data allocations are pageable by default. The GPU cannot access data directly from pageable host memory, so when a data transfer from pageable host memory to device memory is invoked, the CUDA driver must first allocate a temporary page-locked, or “pinned”, host array, copy the host data to the pinned array, and then transfer the data from the pinned array to device memory. 为了避免要拷贝的数据page  out，首先会使用一个临时的pinned memory拷贝数据到那里，然后再拷贝到device上（下图左）。尽管是从CPU的memory->memory，这个过程会经过CPU core，导致内存收到限制。（CMU的最新arch研究关于如何从cpu mem直接拷贝的mem，不经过cpu）
-
-Not-locked memory can generate a page fault on access, and it is stored not only in memory (e.g. it can be in swap), so driver need to access every page of non-locked memory, copy it into pinned buffer and pass it to DMA 如果内存不是pinned的，则访问的时候对应的内存可能在disk/ssd上，需要经过CPU进行page swap，拷贝到临时的pinned memory，再使用DMA从临时pinned memory拷贝到device global memory上
-
-```cpp
-int *h_a = (int*)malloc(bytes);
-memset(h_a, 0, bytes);
-
-int *d_a;
-cudaMalloc((int**)&d_a, bytes);
-// synchronize copy
-cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
-```
-
-
-
-#### Async copy
-
-
-
-* 是什么 & 为了什么
-
-为了避免cpu change memory page, 需要使用pinned memory
-
-之所以async是为了overlap data transfer with computation
-
-
-
-* 特点
-
-1. 可以有higher bandwidth比起没有pinned的内存。
-2. Locked memory is stored in the physical memory (RAM), so device can fetch it w/o help from CPU (DMA, aka Async copy; device only need list of physical pages). pinned内存可以直接使用DMA拷贝到GPU，不需要经过CPU，从而有更大的bandwidth。
-3. 因为pinned内存是有限的资源，分配pinned内存可能会失败，所以一定要检查是否有失败
-4. You should not over-allocate pinned memory. Doing so can reduce overall system performance because it reduces the amount of physical memory available to the operating system and other programs. 不要过度使用pinned memory，这会导致系统整体速度变慢
-
-
-
-<img src="Note.assets/pinned-1024x541.jpg" alt="pinned-1024x541" style="zoom:50%;" />
-
-
-
-* example
-
-```cpp
-int *h_aPinned, d_a;
-cudaMallocHost((int**)&h_aPinned, bytes);
-memset(h_aPinned, 0, bytes);
-
-cudaMalloc((void**)&d_a, bytes);
-
-// synchronize copy
-cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
-
-// pin memory on the fly without need to allocate seprate buffer
-cudaHostRegister()
-```
-
-
-
-##### API
-
-1. `cudHostAlloc()` and `cudaFreeHost` 分配page locked host memory
-
-2. `cudaHostRegister()` page-locks a range of memory allocated by malloc()
-
-
-
-##### Portable Memory
-
-> Reference
->
-> 1. CUDA C++ Programming Guide chapter 3.2.5
-
-
-
-默认page-locked memory只可被分配时所对应的device看见。
-
-如果希望全部的device都可以看见page-locked host memory，passing the flag cudaHostAllocPortable to cudaHostAlloc() or page-locked by passing the flag cudaHostRegisterPortable to cudaHostRegister().
-
-
-
-##### Write-combining memory
-
-> Reference
->
-> 1. CUDA C++ Programming Guide chapter 3.2.5
-
-
-
-默认page lock host memory是cachable，可以read+write。
-
-可以config page-lock内存为write-combine by passing flag cudaHostAllocWriteCombined to cudaHostAlloc()。这样可以
-
-1. free up host L1 L2
-2. not snooped during transfers across the PCI Express bus, which can improve transfer performance by up to 40%. 增加host to device memory transfer的带宽
-
-但是在使用write-combine了以后，只能write。如果read from host的话会非常的慢
-
-
-
-#### Overlap comp w/ memory
-
-> Reference
->
-> 1. CUDA C++ Best Practices Guide chapter 9.1.2
-
-
-
-* 查看设备是否支持同时comp与内存拷贝
-
-```cpp
-cudaDevicePeop dev_prop;
-cudaGetDeviceProperties(&dev_prop, 0);
-
-// 是否支持async compute & memory copy 
-// 1: 支持 1 copy + 1 exec
-// 2: 支持 1 copy host2device, 1 copy dev2host, 2 exec
-dev_prop.asyncEngineCount; 
-```
-
-
-
-* example
-
-```cpp
-size=N*sizeof(float)/nStreams;
-for (i=0; i<nStreams; i++) 
-{
-  offset = i*N/nStreams;
-  cudaMemcpyAsync(a_d+offset, a_h+offset, size, dir, stream[i]);
-  kernel<<<N/(nThreads*nStreams), nThreads, 0, stream[i]>>>(a_d+offset);
-}
-
-```
-
-
-
-<img src="Note.assets/Screen Shot 2022-06-26 at 12.08.17 PM.png" alt="Screen Shot 2022-06-26 at 12.08.17 PM" style="zoom:50%;" />
-
-
-
-
 
 ## Shared memory
 
@@ -1005,6 +854,36 @@ for (i=0; i<nStreams; i++)
 global memory -> cache L1/L2 -> per thread register -> shared memory
 
 不存在直接从global memory到shared memory的硬件
+
+
+
+* 测试shared memory对occupancy的影响
+
+By simply increasing this parameter (without modifying the kernel), it is possible to effectively reduce the occupancy of the kernel and measure its effect on performance.
+
+
+
+##### API
+
+* dynamic use
+
+只可以分配为1D
+
+```cpp
+extern __shared__ int tile[];
+
+MyKernel<<<blocksPerGrid, threadsPerBlock, isize*sizeof(int)>>>(...);
+```
+
+
+
+* static use
+
+可以分配为1/2/3D
+
+```cpp
+__shared__ float a[size_x][size_y];
+```
 
 
 
@@ -1124,6 +1003,7 @@ CUDA 11.0 允许async copy from global memory to shared memory
 3. hardware accelerated on A100 (higher bandwidth, lower latency)
    1. 相比起sync的拷贝来说，async的latency (avg clock cycle)是更小的
 
+<img src="Note.assets/Screen Shot 2022-06-28 at 11.19.35 PM.png" alt="Screen Shot 2022-06-28 at 11.19.35 PM" style="zoom:50%;" />
 
 
 * 与Cache关系
@@ -1143,6 +1023,65 @@ CUDA 11.0 允许async copy from global memory to shared memory
 对于async拷贝，data size是8/16是最快的。
 
 <img src="Note.assets/Screen Shot 2022-06-28 at 11.53.30 AM.png" alt="Screen Shot 2022-06-28 at 11.53.30 AM" style="zoom:50%;" />
+
+
+
+##### Example
+
+```cpp
+template <typename T>
+__global__ void pipeline_kernel_sync(T *global, uint64_t *clock, size_t copy_count) {
+  extern __shared__ char s[];
+  T *shared = reinterpret_cast<T *>(s);
+
+  uint64_t clock_start = clock64();
+
+  for (size_t i = 0; i < copy_count; ++i) {
+    shared[blockDim.x * i + threadIdx.x] = global[blockDim.x * i + threadIdx.x];
+  }
+
+  uint64_t clock_end = clock64();
+
+  atomicAdd(reinterpret_cast<unsigned long long *>(clock),
+            clock_end - clock_start);
+}
+
+template <typename T>
+__global__ void pipeline_kernel_async(T *global, uint64_t *clock, size_t copy_count) {
+  extern __shared__ char s[];
+  T *shared = reinterpret_cast<T *>(s);
+
+  uint64_t clock_start = clock64();
+
+  //pipeline pipe;
+  for (size_t i = 0; i < copy_count; ++i) {
+    __pipeline_memcpy_async(&shared[blockDim.x * i + threadIdx.x],
+                            &global[blockDim.x * i + threadIdx.x], sizeof(T));
+  }
+  __pipeline_commit();
+  __pipeline_wait_prior(0);
+  
+  uint64_t clock_end = clock64();
+
+  atomicAdd(reinterpret_cast<unsigned long long *>(clock),
+            clock_end - clock_start);
+}
+
+```
+
+
+
+##### API
+
+* __pipeline_memcpy_async()
+
+instructions to load from global memory and store directly into shared memory are issued as soon as this function is called
+
+
+
+* __pipeline_wait_prior(0)
+
+wait until all instruction in pipe object have been executed
 
 
 
@@ -1166,15 +1105,19 @@ to different addresses by threads within a warp are serialized, thus the cost sc
 
 如果t0访问constant cache addr 0， t1访问constant cache addr 1，这两个对constant cache的访问会serialized。
 
+对于使用constant cache，最好的访问方法是all threads within warp only access a few (serialization not too much)  / same memory address (use broadcast) of constant cache. 
 
 
-#### Static indexing
+
+#### Static indexing / broadcast
 
 > Reference
 >
 > 1. Caltech CS179 lecture 5
 
 If all threads of a warp access the same location, then constant memory can be as fast as a register access. 这是因为 thread within warp access same memory address via constant cache. data will be broadcast to all threads in warp. 
+
+这里的broadcast行为与shared memory中broadcast很相似
 
 
 
@@ -1586,6 +1529,32 @@ atoimc次数与bandwidth是log的反向相关。下图中的横轴可以理解�
 <img src="Note.assets/image2.png" alt="Figure 1. Performance of filtering with global atomics on Kepler K80 GPU (CUDA 8.0.61)." style="zoom:60%;" />
 
 
+
+
+
+## Hardware Implementation
+
+### PCIe
+
+GPU与CPU通过PCIe链接
+
+PCIe：多个link，每个link包含多个lanes
+
+lane：Each lane is 1-bit wide (4 wires, each 2-wire pair can transmit 8Gb/s in one direction) 支持双向数据传播
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.44.07 PM.png" alt="Screen Shot 2022-07-14 at 5.44.07 PM" style="zoom:50%;" />
+
+
+
+北桥南桥都是用PCIe来链接
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.45.09 PM.png" alt="Screen Shot 2022-07-14 at 5.45.09 PM" style="zoom:50%;" />
+
+### DMA
+
+Direct Memory Access：充分利用bandwidth和IO bus。DMA使用physical address for source and destination, 使用pinnned memory传输数据。
+
+作用：在使用pinned memory做数据拷贝以后，系统使用DMA，可以更充分的利用PCIe的带宽。如果不使用DMA拷贝，则系统无法充分利用PCIe的带宽
 
 
 

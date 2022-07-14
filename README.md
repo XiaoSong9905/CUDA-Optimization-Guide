@@ -49,8 +49,9 @@ Cases.md
   * UIUC ECE 508
   * UC Berkeley CS 267
 * Book
-  * Programming Massively Parallel Processors 3rd edition
+  * Programing Massively Parallel Processors 3rd edition
   * CUDA C++ Best Practices Guide
-  * CUDA C++ Programming Guide
+  * CUDA C++ Programing Guide
+  * Professional CUDA C Progaming
 * Papers
   * Algorithm and Data Optimization Techniques for Scaling to Massively Threaded Systems

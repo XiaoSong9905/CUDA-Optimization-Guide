@@ -49,7 +49,7 @@ ASTA array of structures of tiled arrays 是一种 SoA的变体。相当于AoS o
 
 ### Scatter to Gather
 
-> UIUC ECE 508 Lecture 2
+> UIUC ECE 508 Lecture 2, 5
 
 scatter对于编程来说更加直接
 
@@ -79,10 +79,11 @@ gather : parallel over output, reading values from non-contigious memory locatio
 
 1. write的时候充分利用burst
 2. 没有write conflict，不需要serialize write
+3. input会有重复的，可以利用好cache
 
 
 
-* 程序特点
+* 一般程序特点 （为什么大家习惯写scatter code）
 
 1. input一般是irregular的，output一般是regular的。
    1. 从irregular data映射到regular data是简答的，这也是为什么很多程序是scatter的
@@ -95,8 +96,6 @@ gather : parallel over output, reading values from non-contigious memory locatio
 * gather缺点
 
 1. 存在overlapping read，但是可以被hardware使用cache/shared memory来缓解
-
-
 
 <img src="Note.assets/Screen Shot 2022-06-04 at 9.52.02 PM.png" alt="Screen Shot 2022-06-04 at 9.52.02 PM" style="zoom:50%;" />
 
@@ -371,21 +370,117 @@ GPU上由于thread的总数量很多，使用privitization需要注意
 
 
 
+### Cutoff
+
+> Reference
+>
+> 1. UIUC ECE 508 Lecture 5 & 6
+
+
+
+* 是什么
+
+只考虑在一个cutoff threshold内的元素之间的关系（基于physica），不考虑cutoff外的元素之间的关系或者cutoff外用简单的计算来近似
+
+
+
+* 为什么用
+
+为了解决data scalability的问题，使用近似算法从而得到 linear complexity的结果
+
+
+
+#### Example
+
+1. biomolecules
+
+
+
 ### Binning
 
-> 这个部分不太懂
+> Reference
+>
+> 1. UIUC ECE 508 Lecture 5 & 6
 
-是什么：create a map from output location to small subset of input location.
 
-sorting of input elements into bins representing a region of space containing those input elements.
+
+* 为什么使用binning
+
+gpu prefer gather computation over scatter computation. 也就需要有一个output element到input element的映射关系，这样才可以对于每一个output element用一个thread，通过映射关系找到全部对应的input element，计算结果。
+
+但是parallel over output有scalability issue
+
+一般input是irregular的，output是regular的，很难从regular到irregular找到映射，从irregular到regular的映射更简单一些(e.g.  atom 3d location is irregular, grid position is regular, use 3d location & divide to get grid location)
+
+
+
+* 是什么 (input binning)
+
+把irregular input放到某种regular的bin中，这样从regular output到irregular input的映射的时候，就可以到对应的regular bin中去找，加快速度。
+
+每个bin包含某种property（e.g. spatial location), 相当于把data按照bin的property给coarlesed。
+
+可以理解为data coarlesing，当访问bin的时候，访问all data inside bin。
+
+
+
+#### Data Scalability
+
+* 是什么
+
+complexity 与 input size 不是linear的情况
+
+
+
+* 什么时候产生
+
+给output (regular)，判断哪些input(irregular)是相关的（或者哪些input是不相关的）是很难的。
+
+如果通过遍历全部的input来找到每一个output的相关，会产生data scalability issue
+
+
+
+* 为什么是问题
+
+如果代码为了改变为parallel over gather而改变complexity为n log n / log n的话，对于large data来说是效果不好的，因为越是数据大，log的效果越明显
+
+sequential O(N) algorithm can easily outperform O(n log n) parallel algorithm
+
+但是使用gpu的情况又是在数据量很大的情况。
+
+<img src="Note.assets/Screen Shot 2022-07-13 at 6.22.24 PM.png" alt="Screen Shot 2022-07-13 at 6.22.24 PM" style="zoom:50%;" />
+
+
+
+* 对于HPC
+
+first thing when have parallel algorithm, how to change it to O(n) so that it's data scalable
+
+
+
+* poor scalability例子 ： DCS
+
+DCS算法需要对每一个grid point计算每一个atom的contribution，complexity是 O(V^2)的
+
+
+
+#### Example
+
+1. CDS的简化算法
 
 
 
 ### Compaction
 
-是什么：压缩数据中的hole，从而减少memory overhead
+是什么：压缩数据中的hole，从而减少memory overhead（global memory, shared memory, memory transfer bandwidth)
 
 <img src="Note.assets/Screen Shot 2022-06-04 at 5.12.26 PM.png" alt="Screen Shot 2022-06-04 at 5.12.26 PM" style="zoom:50%;" />
+
+
+
+#### Example
+
+1. SpMV
 
 
 

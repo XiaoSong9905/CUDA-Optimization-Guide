@@ -66,8 +66,27 @@ dev_prop.asyncEngineCount;
 
 
 
-
 ## Block
+
+#### Common Config
+
+> Reference
+>
+> 1. CUDA best practice guide chapter 10.3
+
+
+
+1. block per grid > number of sm
+   1. to fully utlize sm resource
+2. block per sm > 1
+   1. to hide latency due to syncthread
+3. Between 128 and 256 threads per block is a good initial range for experimentation with different block sizes.
+4. multiple of warp size
+5. A minimum of 64 threads per block should be used, and only if there are multiple concurrent blocks per multiprocessor.
+6. Use several smaller thread blocks rather than one large thread block per multiprocessor if latency affects performance. This is particularly beneficial to kernels that frequently call __syncthreads().
+   1. user lagrger block size does not means better performence.
+
+
 
 #### Sync
 
@@ -198,6 +217,8 @@ cc 7.x arithmetic instruction 需要 16 warp来hide latency，因为计算操作
 syncthread 会导致latency (warp not ready to execute next instruction due to barrier)
 
 让sm有更多的resident block可以reduce idle in this case. 当一个block存在syncthread idle的时候，其余block的warp可以运行来hide latency
+
+需要注意的是larger block size并不意味着higher occupancy, 因为sync导致的idle以及resource按照block为单位进行分配
 
 
 
@@ -556,6 +577,28 @@ each block 使用 2 * 32 * 32 * 4 bytes (float) = 8kb bytes share memory
 
 ### Occupancy
 
+#### Basic
+
+> Reference
+>
+> 1. CUDA C++ Best practice guid chapter 10.1
+
+
+
+* 是什么
+
+number of active warp on sm / maximum number of possible active warp
+
+理解为percentage of hardware's abaility to process warp that's actively in use
+
+
+
+* 对程序的影响
+
+higher occupancy 并不意味着一定有higher performence，到达某一个point以后再增加occupancy不会improve performance，因为latency已经都被hiding了
+
+lower occupancy一般意味着unable to hide latency, 导致perf不好
+
 
 
 #### API
@@ -575,6 +618,8 @@ each block 使用 2 * 32 * 32 * 4 bytes (float) = 8kb bytes share memory
 ##### configure
 
 `cudaOccupancyMaxPotentialBlockSize` and `cudaOccupancyMaxPotentialBlockSizeVariableSMem` 可以计算optimal configuration给定kernel
+
+
 
 
 
@@ -672,6 +717,262 @@ Note that in the diagram above, the core has the ability to maintain execution c
 
 
 Do not confuse the requirement that all CUDA threads (or their corresponding warps) in a thread block must be live--a.k.a. occupying an execution context on a core-- during the lifetime of the thread block (a requirement that we discuss again on slide 73) with the fact that the core can indeed run instructions from multiple threads simultaneously on its parallel execution units. It seems to me that interleaved multi-threading and simultaneous execution of instructions from multiple threads are being confused in some of the comments posted above. 一个block内thread只要运行的时候就是都active的，因为SM是以block为单位分配资源。
+
+
+
+## Task Parallelism & Stream
+
+### Stream
+
+> Reference
+>
+> 1. UIUC ECE 408 Lecture 22
+
+
+
+device requests made from the host code (also from device code) are put into a (task) queue
+
+cuda runtime driver ensure commands in queue are processed in sequence
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.04.54 PM.png" alt="Screen Shot 2022-07-14 at 5.04.54 PM" style="zoom:50%;" />
+
+stream与kernel / copy engien的conceptual 关系
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.08.39 PM.png" alt="Screen Shot 2022-07-14 at 5.08.39 PM" style="zoom:50%;" />
+
+
+
+
+
+#### Older GPU
+
+特点：support streams in software
+
+
+
+对于不同的eng，每个eng有自己的queue。多个stream的task被直接放到eng的queue中。
+
+多个stream的task被放到single queue (for each engine)。由于dependency的存在，只有stream edge才会被overlap。
+
+e.g. A B C都是kernel engine来负责，P Q R都是kernel engien来负责，kernel engien同时可以schedule16个grid。但是由于A B C 存在dependency + task queue只有一个，没有运行到C的时候scheduler是看不到还有P这个可以分开执行的task
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.34.01 PM.png" alt="Screen Shot 2022-07-14 at 5.34.01 PM" style="zoom:50%;" />
+
+
+
+每个eng的queue之间有dependency关系，导致eng的部分task本来可以运行，但是由于是存放在eng内的queue中，不可以前后调换位置。
+
+下面的例子里，copy A.2 copy B.2本可以运行，但是因为前面有copy C.1在queue中，copy C.1对kernel eng有依赖，所以只有kernel1运行结束，copy C.1运行结束，才可以运行copy A.2 B.2
+
+```cpp
+for (int i=0; i<n; i+=SegSize*2) {
+  cudaMemcpyAsync(d_A1, h_A+i, SegSize*sizeof(float),.., stream0);
+  cudaMemcpyAsync(d_B1, h_B+i, SegSize*sizeof(float),.., stream0);
+  vecAdd<<<SegSize/256, 256, 0, stream0>>>(d_A0, d_B0, ...);
+  cudaMemcpyAsync(h_C+i, d_C1, SegSize*sizeof(float),.., stream0);
+
+  cudaMemcpyAsync(d_A2, h_A+i+SegSize; SegSize*sizeof(float),.., stream1);
+  cudaMemcpyAsync(d_B2, h_B+i+SegSize; SegSize*sizeof(float),.., stream1);
+  vecAdd<<<SegSize/256, 256, 0, stream1>>>(d_A1, d_B1, ...);
+  cudaMemcpyAsync(h_C+i+SegSize, d_C2, SegSize*sizeof(float),.., stream1);
+}
+```
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.13.11 PM.png" alt="Screen Shot 2022-07-14 at 5.13.11 PM" style="zoom:50%;" />
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.28.31 PM.png" alt="Screen Shot 2022-07-14 at 5.28.31 PM" style="zoom:50%;" />
+
+
+
+```cpp
+for (int i=0; i<n; i+=SegSize*2) {
+  cudaMemcpyAsync(d_A1, h_A+i, SegSize*sizeof(float),.., stream0);
+  cudaMemcpyAsync(d_B1, h_B+i, SegSize*sizeof(float),.., stream0);
+  cudaMemcpyAsync(d_A2, h_A+i+SegSize, SegSize*sizeof(float),.., stream1);
+  cudaMemcpyAsync(d_B2, h_B+i+SegSize, SegSize*sizeof(float),.., stream1);
+ 
+  vecAdd<<<SegSize/256, 256, 0, stream0>>>(d_A0, d_B0, ...);
+  cudaMemcpyAsync(h_C+i, d_C1, SegSize*sizeof(float),.., stream0);
+  vecAdd<<<SegSize/256, 256, 0, stream1>>>(d_A1, d_B1, ...);
+  cudaMemcpyAsync(h_C+i+SegSize, d_C2, SegSize*sizeof(float),.., stream1);
+}
+```
+
+下面对代码进行reorder，依旧保证stream内部的顺序，但是把copy A.1 B.2放到copy C.0之前，从而避免了A.1 B.1需要等待C.0 & kernel 0
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.26.45 PM.png" alt="Screen Shot 2022-07-14 at 5.26.45 PM" style="zoom:50%;" />
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.28.41 PM.png" alt="Screen Shot 2022-07-14 at 5.28.41 PM" style="zoom:50%;" />
+
+
+
+#### Hyper Queue
+
+特点：每个engine有multiple real stream queue
+
+由于每个engine现在有多个queue，在运行A的时候也就能看到P X，也就可以运行这些task。（最多可以支持32 task schedule in parallel）
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 5.36.22 PM.png" alt="Screen Shot 2022-07-14 at 5.36.22 PM" style="zoom:50%;" />
+
+
+
+
+
+
+### Pinned Memory
+> Reference
+>
+> 1. NVIDIA Tech Blog How to Optimize Data Transfers in CUDA C/C++ [link](https://developer.nvidia.com/blog/how-optimize-data-transfers-cuda-cc/)
+>    1. 包含了一个memory bandwidth test的代码
+> 2. Stackoverflow Why is CUDA pinned memory so fast? [link](https://stackoverflow.com/questions/5736968/why-is-cuda-pinned-memory-so-fast)
+
+
+
+#### Sync copy
+
+* 内存拷贝时发生了什么
+
+Host (CPU) data allocations are pageable by default. The GPU cannot access data directly from pageable host memory, so when a data transfer from pageable host memory to device memory is invoked, the CUDA driver must first allocate a temporary page-locked, or “pinned”, host array, copy the host data to the pinned array, and then transfer the data from the pinned array to device memory. 为了避免要拷贝的数据page  out，首先会使用一个临时的pinned memory拷贝数据到那里，然后再拷贝到device上（下图左）。尽管是从CPU的memory->memory，这个过程会经过CPU core，导致内存收到限制。（CMU的最新arch研究关于如何从cpu mem直接拷贝的mem，不经过cpu）
+
+Not-locked memory can generate a page fault on access, and it is stored not only in memory (e.g. it can be in swap), so driver need to access every page of non-locked memory, copy it into pinned buffer and pass it to DMA 如果内存不是pinned的，则访问的时候对应的内存可能在disk/ssd上，需要经过CPU进行page swap，拷贝到临时的pinned memory，再使用DMA从临时pinned memory拷贝到device global memory上
+
+```cpp
+int *h_a = (int*)malloc(bytes);
+memset(h_a, 0, bytes);
+
+int *d_a;
+cudaMalloc((int**)&d_a, bytes);
+// synchronize copy
+cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
+```
+
+
+
+#### Async copy
+
+
+
+* 是什么 & 为了什么
+
+为了避免cpu change memory page, 需要使用pinned memory
+
+之所以async是为了overlap data transfer with computation
+
+
+
+* 特点
+
+1. 可以有higher bandwidth比起没有pinned的内存。
+2. Locked memory is stored in the physical memory (RAM), so device can fetch it w/o help from CPU (DMA, aka Async copy; device only need list of physical pages). pinned内存可以直接使用DMA拷贝到GPU，不需要经过CPU，从而有更大的bandwidth。
+3. 因为pinned内存是有限的资源，分配pinned内存可能会失败，所以一定要检查是否有失败
+4. You should not over-allocate pinned memory. Doing so can reduce overall system performance because it reduces the amount of physical memory available to the operating system and other programs. 不要过度使用pinned memory，这会导致系统整体速度变慢
+
+
+
+<img src="Note.assets/pinned-1024x541.jpg" alt="pinned-1024x541" style="zoom:50%;" />
+
+
+
+* example
+
+```cpp
+int *h_aPinned, d_a;
+cudaMallocHost((int**)&h_aPinned, bytes);
+memset(h_aPinned, 0, bytes);
+
+cudaMalloc((void**)&d_a, bytes);
+
+// synchronize copy
+cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
+
+// pin memory on the fly without need to allocate seprate buffer
+cudaHostRegister()
+```
+
+
+
+##### API
+
+1. `cudHostAlloc()` and `cudaFreeHost` 分配page locked host memory
+
+2. `cudaHostRegister()` page-locks a range of memory allocated by malloc()
+
+
+
+##### Portable Memory
+
+> Reference
+>
+> 1. CUDA C++ Programming Guide chapter 3.2.5
+
+
+
+默认page-locked memory只可被分配时所对应的device看见。
+
+如果希望全部的device都可以看见page-locked host memory，passing the flag cudaHostAllocPortable to cudaHostAlloc() or page-locked by passing the flag cudaHostRegisterPortable to cudaHostRegister().
+
+
+
+##### Write-combining memory
+
+> Reference
+>
+> 1. CUDA C++ Programming Guide chapter 3.2.5
+
+
+
+默认page lock host memory是cachable，可以read+write。
+
+可以config page-lock内存为write-combine by passing flag cudaHostAllocWriteCombined to cudaHostAlloc()。这样可以
+
+1. free up host L1 L2
+2. not snooped during transfers across the PCI Express bus, which can improve transfer performance by up to 40%. 增加host to device memory transfer的带宽
+
+但是在使用write-combine了以后，只能write。如果read from host的话会非常的慢
+
+
+
+### Overlap comp w/ memory
+
+> Reference
+>
+> 1. CUDA C++ Best Practices Guide chapter 9.1.2
+
+
+
+* 查看设备是否支持同时comp与内存拷贝
+
+```cpp
+cudaDevicePeop dev_prop;
+cudaGetDeviceProperties(&dev_prop, 0);
+
+// 是否支持async compute & memory copy 
+// 1: 支持 1 copy + 1 exec
+// 2: 支持 1 copy host2device, 1 copy dev2host, 2 exec
+dev_prop.asyncEngineCount; 
+```
+
+
+
+* example
+
+```cpp
+size=N*sizeof(float)/nStreams;
+for (i=0; i<nStreams; i++) 
+{
+  offset = i*N/nStreams;
+  cudaMemcpyAsync(a_d+offset, a_h+offset, size, dir, stream[i]);
+  kernel<<<N/(nThreads*nStreams), nThreads, 0, stream[i]>>>(a_d+offset);
+}
+
+```
+
+
+
+<img src="Note.assets/Screen Shot 2022-06-26 at 12.08.17 PM.png" alt="Screen Shot 2022-06-26 at 12.08.17 PM" style="zoom:50%;" />
+
 
 
 
@@ -909,60 +1210,67 @@ small integer power $x^2, x^3$, use explicit multiplication 总是比general pur
 
 
 
-
-# Below are old content
-
-
+# Measure Performence
 
 > Reference
 >
-> 1. UIUC ECE Lecture 2,3
-> 1. Programming Massively Parallel Processors 3rd chapter 2,3
+> 1. UIUC ECE 408 Lecture 27
+> 2. UC Berkeley CS267 Project 1
 
 
 
+#### Speedup
+
+time ( sequential ) / time ( parallel )
+
+在measure sequential的时候，一般measure最好的，找到的baseline，而不是自己写的baseline
 
 
 
+#### Efficency
 
-
-#### Handle Corner Case
-
-* handle 1d corner case
-
-```cpp
-__global__ void add( int* A, int* B, int* C, int n )
-{
-        i = blockIdx.x * blockDim.x + threadIdx.x;
-      // avoid kernel larger than data
-    if ( i < n )
-      C[i] = A[i] + B[i];
-}
-```
+speedup on P processor / P 
 
 
 
-* handle 2d corner case
+常用于衡量多cpu core的程序
 
-<img src="../HPC-Notes/Note.assets/Screen Shot 2021-11-07 at 12.45.45 PM.png" alt="Screen Shot 2021-11-07 at 12.45.45 PM" style="zoom:30%;" />
-
-```cpp
-__global__ void RGB2GRAY(unsigned char* gray, unsigned char* rgb, int width, int height)
-{
-  int col = threadIdx.x + blockIdx.x * blockDim.x;
-  int row = threadIdx.y + blockIdx.y * blockDim.y;
-  if ( col < width && row < height )
-  {
-    // do computation
-  }
-}
-```
+希望是接近1，大多数情况都是小于1的
 
 
 
+superlinear speedup：由于使用了extra resoruce (例如cache等等) 所以efficency大于1
 
 
 
+对于GPU来说，efficency衡量的就不是很有效了。
+
+对于GPU，一般衡量efficency是 compare resource used with GPU's peak value
 
 
 
+#### Scalability
+
+对于多少个processor，efficency是接近1。对于多少个processor efficency是减小的
+
+speed up <-> num of processor的图
+
+good scalability : speed up curve not fall of for max measureable value of P
+
+
+
+下图的这个例子里，就不是scalable code
+
+<img src="Note.assets/Screen Shot 2022-07-14 at 6.02.25 PM.png" alt="Screen Shot 2022-07-14 at 6.02.25 PM" style="zoom:50%;" />
+
+
+
+#### Strong Scaling
+
+In strong scaling we keep the problem size constant but increase the number of processors
+
+
+
+#### Weak Scaling
+
+In weak scaling we increase the problem size proportionally to the number of processors so the work/processor stays the same
