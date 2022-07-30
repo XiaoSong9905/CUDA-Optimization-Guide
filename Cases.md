@@ -4,9 +4,18 @@
 
 ### Direct Coulombs Summation DCS
 
+> Reference
+>
+> 1. Programming Massive Parallel Processors Chapter 15
+> 2. UIUC ECE 508
+
+
+
 irregular input atom and regular output potential grid. Every input influence every output. Given a input atom array, calculate potential on each output grid location.
 
 DCS是最精确的方法，也可以使用其余的方法从而更快，但是就没有这么精确了
+
+DCS算法is not data scalable, 因为complexity是O(V^2) 而不是O(V) where n m ≈ V volume
 
 <img src="Note.assets/Screen Shot 2022-06-05 at 7.06.24 PM.png" alt="Screen Shot 2022-06-05 at 7.06.24 PM" style="zoom:50%;" />
 
@@ -16,15 +25,19 @@ DCS是最精确的方法，也可以使用其余的方法从而更快，但是�
 
 minimize computation by moving loop invariance out of loop
 
+计算2D slices of a 3D grid
+
+on the fly 计算grid point location。只需要small amount of calculation来减少额外的对内存的访问，所以不是问题。
+
 ![Screen Shot 2022-06-05 at 7.11.03 PM](Note.assets/Screen Shot 2022-06-05 at 7.11.03 PM.png)
 
 
 
 #### Scatter CUDA Code
 
-替换C code部分的for loop为thread
+替换C code部分的最外层for loop为thread，也就是每个thread负责一个atom对应全部grid point的影响
 
-需要使用CUDA atomic。由于atoimic导致serialization，会慢
+需要使用CUDA atomic。由于atoimic导致serialization，会慢。
 
 <img src="Note.assets/Screen Shot 2022-06-05 at 7.34.22 PM.png" alt="Screen Shot 2022-06-05 at 7.34.22 PM" style="zoom:50%;" />
 
@@ -58,6 +71,28 @@ minimize computation by moving loop invariance out of loop
 
 
 
+* constant cache
+
+atom array可以通过constant cache读取。这样一个warp内32个thread会通过constant cache + broadcast机制加快读取
+
+
+
+* thread coarsening 
+
+一个thread可以负责多个grid point，从而（1）减少laucnh too much block （2）reuse some data access and computation
+
+
+
+* further hide latency
+
+可以在kernel/for loop的一开始，读取energygrid的数据，放到cache里。然后当for loop运行结束后再write into energygrid。
+
+这样的话两个内存访问(一个read，一个write)中间有更久的间隔，更小的latency，更容易hide，减少number of warps needed by SM scheduler to hide global memory latency
+
+read memory -> do some work -> write memory
+
+
+
 #### Improved Gather C Code
 
 对于CPU代码来说，cache的利用比computation更重要。尽管scatter C code的计算最少，但是并非是对cache利用最好的
@@ -70,11 +105,13 @@ C code中更好办法在这个问题里实际上是output oriented的
 
 
 
-#### Thread granularity
+#### CUDA Thread granularity
 
 原来：each thread compute one output (见common optimization techiniques - scatter to gather - dcs example )
 
-现在：each thread compute four output
+现在：each thread compute four output (grid point) in a row
+
+原因：计算grid points in a row的时候，对于dy dysqpdzsq等变量的计算是可以复用的
 
 
 
@@ -84,14 +121,54 @@ C code中更好办法在这个问题里实际上是output oriented的
 
 优点
 
-1. reduce number of load of atoms array by factor of 4
-2. eliminate redundant computation like dxx, dysqpdzsq
+1. reuse memory access: reduce number of load of atoms array by factor of 4。原来每个grid point都需要读取一遍atom array，现在每次读取atom array的数据都会被应用在4个grid point上。
+2. reuse computation result: eliminate redundant computation like dxx, dysqpdzsq
 
 
 
 缺点：
 
 1. 使用更多register，现在需要储存4个dxi, 4个energvalxi.
+
+
+
+#### CUDA Memory Coarlesing
+
+* 为什么不memory coarlesing了
+
+在使用了上面的thread granularity调整以后，每个thread写入同一个row的连续4个grid point，导致two adjacent threads access memory location that's 3 elements aparts. 下面的Figure显示了一个thread写入的memory location（四个黑色箭头）
+
+<img src="Note.assets/Screen Shot 2022-07-21 at 2.36.23 PM.png" alt="Screen Shot 2022-07-21 at 2.36.23 PM" style="zoom:50%;" />
+
+* 解决方法
+
+assigning adjacent grid points (output location) to adjacent threads in each half-warp (prev gen Arch) / warp (recent gen Arch). 
+
+idx 0-31 : thread 0-31
+
+idx 32-63 : thread 0-31
+
+也就是每个thread负责的4个grid point，现在不是连续的4个grid point，而是16/32 grid points away。
+
+当read/write内存的时候，一个warp内全部的thread首先访问idx 0-31的数据，然后再访问idx 32-63的数据。
+
+可以通过对于内存访问的reorder，从而同时利用write与read的双向bandwidth，而不是一开始都是read，结尾的时候都是write。
+
+
+
+* Padding for aliasing
+
+现在一个warp内会访问连续的内存，也就需要grid x-dim需要时16/32的倍数，从而在访问完row0，开始访问row1的时候，依旧是alias global memory access。
+
+这也就需要padding。
+
+
+
+如果不想用if branch来处理y dim的访问，也可以通过pad y to multiplier of 32的方法，俩减少（1）branch control instruction overhead (2) branch divergence
+
+
+
+如果padding 3D的overhead过大的话，可以选择处理多个2D + padding slides
 
 
 
@@ -978,6 +1055,7 @@ __shared__ float transposedTile[TILE_DIM][TILE_DIM+1];
 > Reference
 >
 > 1. UIUC ECE 408 Lecture 19, 20
+> 1. Programmming Massive Parallel Processor chapter 10
 
 
 
@@ -988,6 +1066,12 @@ __shared__ float transposedTile[TILE_DIM][TILE_DIM+1];
 1. irregular input data 
 2. little or no data reuse
 3. compiler 很难优化
+
+
+
+* 常用于计算
+
+很多时候SpMV用于iterative approach里，matrix不改变，vector改变。所以下面的很多data format transform只需要进行一次，就可以被iterative approach使用多次，amortize cost。
 
 
 
@@ -1017,8 +1101,10 @@ __shared__ float transposedTile[TILE_DIM][TILE_DIM+1];
 
 * 特点
 
-1. warp divergence, 一个warp内的thread由于负责不同的row，有不同的nonzero element，需要for loop运行的次数不一样
-2. 没有coarlesed memory read，每个thread access random and non-adjacent memory location
+1. 一般sparse matrix有上百多个row，每个thread负责一个row可以充分的利用gpu hw
+2. warp divergence, 一个warp内的thread由于负责不同的row，有不同的nonzero element，需要for loop运行的次数不一样
+3. 没有coarlesed memory read，每个thread access random and non-adjacent memory location
+4. performence由于(2) (3) 的原因，是data-dependent的，依赖于数据的分布
 
 <img src="Note.assets/Screen Shot 2022-07-13 at 11.03.34 PM.png" alt="Screen Shot 2022-07-13 at 11.03.34 PM" style="zoom:50%;" />
 
@@ -1041,14 +1127,23 @@ block performence由longest row决定。导致不同block所花费的时间也�
 
 * 特点
 
-1. pad row with 0 从而让每个thread的amount of work相同
+1. pad row with 0 从而让每个thread的amount of work相同, no branch divergence
 2. transpose input data从而coarlesed memory access
+3. 相比起CSR的kernel，不再需要row_ptr的ptr了，现在使用num_elem这个变量
 
 
 
 <img src="Note.assets/Screen Shot 2022-07-13 at 11.05.00 PM.png" alt="Screen Shot 2022-07-13 at 11.05.00 PM" style="zoom:50%;" />
 
 <img src="Note.assets/Screen Shot 2022-07-13 at 11.05.10 PM.png" alt="Screen Shot 2022-07-13 at 11.05.10 PM" style="zoom:50%;" />
+
+
+
+* 过多的padding
+
+1. 占用global memory
+2. 占用shared memory
+3. 占用instruction pipeline
 
 
 
@@ -1071,9 +1166,8 @@ block performence由longest row决定。导致不同block所花费的时间也�
 
 * 特点
 
-可以reorder nonzero data，因为explicitly store row & col
-
-不常完全使用COO format，因为parallel的时候需要使用atomic来更新数据。
+1. 可以reorder nonzero data，因为explicitly store row & col
+2. 不常完全使用COO format，因为parallel的时候需要使用atomic来更新数据。
 
 
 
@@ -1106,7 +1200,9 @@ parallel的时候
 
 使用device来计算ELL
 
-使用host来计算COO
+使用host来计算COO, convert CSR to ELL + COO
+
+也可以使用GPU实现COO的计算。每个thread负责portion of the data elements + 使用atomic operation来accumulate results into y
 
 
 
@@ -1141,6 +1237,22 @@ adjacent thread依旧访问non-adjacent memory location，无法coarlesed memory
 <img src="Note.assets/Screen Shot 2022-07-14 at 4.40.44 PM.png" alt="Screen Shot 2022-07-14 at 4.40.44 PM" style="zoom:50%;" />
 
 <img src="Note.assets/Screen Shot 2022-07-14 at 4.42.29 PM.png" alt="Screen Shot 2022-07-14 at 4.42.29 PM" style="zoom:50%;" />
+
+
+
+#### Hybrid JDS + ELL
+
+* 是什么
+
+首先使用JDS进行sorting，然后把数据分为多个section，在每个section内部使用ELL
+
+
+
+* 特点
+
+1. 每个section中的row数量得足够多，才值得使用一个kernel
+2. 对于每个ELL section，使用一个kernel
+3. 最新的gpu arch上，memory coarlesed越发不是问题，但是memory bandwidth越发是问题，所以要通过JDS+多个seciton的办法来避免使用过多的dummy elements
 
 
 
@@ -1431,6 +1543,142 @@ reduction ratio for different tile size and tile width
 <img src="Note.assets/Screen Shot 2022-06-01 at 11.24.22 AM.png" alt="Screen Shot 2022-06-01 at 11.24.22 AM" style="zoom:50%;" />
 
 <img src="Note.assets/Screen Shot 2022-06-01 at 11.24.34 AM.png" alt="Screen Shot 2022-06-01 at 11.24.34 AM" style="zoom:50%;" />
+
+
+
+### ConvNet
+
+> Reference
+>
+> 1. Programming Massive Parallel Processors chapter 16
+
+
+
+* 定义
+
+input feature map X [C, H, W]
+
+filter bank W[C, M, K, K] = set of M [C, K, K]
+
+output feature map Y[M, H-K+1, W-K+1]
+
+each output feature map m of M is the sum of convolutional of all input feature maps
+
+
+
+#### C Code
+
+```cpp
+// Mini-batch of size n
+parallel for ( n = 0; n < N; ++n )
+{
+  // For each output feature map
+  parallel for ( m = 0; m < M; ++m )
+  {
+    // One pixel of the current (idx m) feature map
+    parallel for ( h = 0; h < H_out; ++h )
+    {
+      parallel for ( w = 0; w < W_out; ++w )
+      {
+        Y[m, h, w] = 0;
+        // 3D Convolution between 3D input feature map of channel C and 3D filter bank.
+        for ( c = 0; c < C; ++c )
+        {
+          for ( p = 0; p < K; ++p )
+          {
+            for ( q = 0; q < K; ++q )
+            {
+              Y[m, h, w] += X[c, h+p, w+q] * W[m, c, q, p];
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+
+
+#### Forward path CUDA
+
+3D thread blocks, each thread compute one element of one output feature map
+
+X : corr to one sample in mini-batch
+
+Y: corr to one output feature map
+
+Z: one location on output feature map defined by (h, w)
+
+each thread : 3 nested for loop of C K K来计算conv
+
+
+
+* reduce global memory
+
+1. put filter in shared memory
+2. put part of input feature map into shared memory X[n, c]
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-21 at 6.25.30 PM.png" alt="Screen Shot 2022-07-21 at 6.25.30 PM" style="zoom:50%;" />
+
+
+
+#### Forward path as GEMM
+
+<img src="Note.assets/Screen Shot 2022-07-21 at 6.26.20 PM.png" alt="Screen Shot 2022-07-21 at 6.26.20 PM" style="zoom:50%;" />
+
+
+
+unrolled input matrix的每个col包含all input values necessary to compute one element of output feature
+
+unrolled input matrix一共有number of pixels in one output feature map个 （H_out * W_out)
+
+unrolled input matrix的每个row = `C*K*K`
+
+input data会被replicate多次 
+
+
+
+unrolled filter bank的每个row对应着one output feature map所需要的全部weight
+
+unrolled filter bank一共有number of output feature map个row
+
+没有duplication of weight
+
+
+
+* expansion ratio
+
+当input output feature map比filter bank要显著的大的时候，expansion ratio of input matrix接近于K*K
+
+
+
+* reduce memory footprint
+
+只分配一个shared memory of size C * K * K * H_out  * W_out, 复用这块内存来储存不同channel的input unrolled matrix
+
+
+
+* 特点
+
+因为dim of matrix是product of feature map dim, 在network 前后总的matrix大小是相似的
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-21 at 6.37.26 PM.png" alt="Screen Shot 2022-07-21 at 6.37.26 PM" style="zoom:50%;" />
+
+
+
+#### CuDNN
+
+可以选择计算方法
+
+1. GEMM
+   1. 使用on-the-fly lazy generation
+2. Winograd
+3. FFT
 
 
 
@@ -2071,4 +2319,294 @@ if (threadIdx.x == 0)
 __syncthreads();
 const int bid = sbid;
 ```
+
+
+
+### MRI
+
+> Reference
+>
+> 1. Programming Massive Parallel Processor chapter 14
+
+
+
+* 两种scan的方法
+
+1. uniform grid scan
+   1. 计算简单
+2. non-catersion scan
+   1. 计算复杂，但是SNR更高
+   2. GPU使得non-catersion计算成为可能
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-21 at 11.33.11 AM.png" alt="Screen Shot 2022-07-21 at 11.33.11 AM" style="zoom:50%;" />
+
+
+
+#### Core Computation in C
+
+把MRI计算中最核心的计算用C代码表达出来，这个section只关注于如何加速这个core computation
+
+
+
+```cpp
+// each sample point in k space
+for ( int m = 0; m < M; m++ )
+{
+    // real and imaginary component of Mu of each sample point in k-space
+    rMu[m] = rPhi[m] * rD[m] + iPhi[m] * iD[m];
+    iMu[m] = rPhi[m] * iD[m] - iPho[m] * rD[m];
+
+    // each voxel in reconstructed image
+    for ( int n = 0; n < N; n++ )
+    {
+        expFhd = 2 * PI * ( kx[m] * x[n] + \
+                            ky[m] * y[n] + \
+                            kz[m] * z[n] );
+        cArg = cos(expFhd);
+        sArg = sin(expFhd);
+        
+      	// real and imaginary component of FhD of each voxel in reconstructed image
+        // No voxel element depend on other voxel element, all element of FhD can be computed independently
+        rFhD[n] += rMu[m] * cArg - iMu[m] * sArg;
+        iFhD[n] += iMu[m] * cArg + rMu[m] * sArg;
+    }
+
+}
+```
+
+
+
+#### Map to GPU threads
+
+* 想法1
+
+每个thread对应一个outer loop of m
+
+
+
+优点：
+
+1. 简单实现
+
+
+
+缺点
+
+1. 更新rFhD的时候需要使用atomic。Million of thread更新atomic会导致很大的bottleneck。rFhD很大无法privatization
+2. scatter的计算方式
+
+
+
+* 想法2
+
+每个thread对应一个inner loop of n
+
+
+
+优点：
+
+1. 没有atomic的问题
+2. gather的计算方式
+
+
+
+缺点：
+
+1. 需要loop interchange，但是loop of m与loop of n之间有其余的计算，无法直接loop interchange
+
+
+
+* 想法2的解决方法：loop fission/splitting
+
+通过split / fuse loop的方法来允许loop interchange
+
+<img src="Note.assets/Screen Shot 2022-07-21 at 12.42.37 PM.png" alt="Screen Shot 2022-07-21 at 12.42.37 PM" style="zoom:50%;" />
+
+
+
+* 对于第一个loop
+
+每个thread负责一个/多个iteration。
+
+
+
+* 对于第二个loop+loop
+
+首先进行loop interchange，然后每个thread负责一个或者多个iteration（每个thread负责多个iteration，减少对M的访问次数）
+
+<img src="Note.assets/Screen Shot 2022-07-21 at 12.43.59 PM.png" alt="Screen Shot 2022-07-21 at 12.43.59 PM" style="zoom:50%;" />
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-21 at 12.45.18 PM.png" alt="Screen Shot 2022-07-21 at 12.45.18 PM" style="zoom:50%;" />
+
+
+
+
+
+#### Reduce global memory bandwidth
+
+##### Use register
+
+* 对于n相关变量
+
+使用register储存n dependent variable,  例如 x[n], y[n], z[n], rFhD[n], iFhD[n] 
+
+CUDA Compiler不会默认把这些对array的固定位置的访问放到register上（CPU compiler可能会进行对应操作）
+
+
+
+* 对于m相关有复用的变量
+
+rMu iMu 这种简单的变量重复使用，compiler会意识到是只访问了两个位置，会使用temp register
+
+
+
+##### Constant cache
+
+与m相关的element没有被write，只有read。可以使用constant cache读取的方法，从而让一个warp内的全部thread通过constant cache + broadcast 的方法使用这些变量。
+
+all threads in a warp will be accessing the same element of kx, ky, and kz in rouphly lock step (starting from kepler, no more lock step, but the memory will still be broadcast)
+
+对于老版本的Arch，需要切分input为多个64kb部分+启动多个kernel
+
+对于新版本的Arch，通过`const __restrict__` keyword/intrinsic 来使用const cache
+
+
+
+##### AoS
+
+对于kx, ky, kz来说，使用AoS而不是SoA会更好的利用cache
+
+<img src="Note.assets/Screen Shot 2022-07-21 at 2.00.05 PM.png" alt="Screen Shot 2022-07-21 at 2.00.05 PM" style="zoom:50%;" />
+
+对于一个warp来说，访问kx[i], ky[i], kz[i]是被全部的thread shared的，只用访问一次global memory，数据会被broadcast到warp内的全部thread中
+
+对于不同的warp来说，由于iter m可能在不同的位置，所以会访问不同的kx[i]的位置。
+
+如果使用SoA的话，每个warp的每个iteration都会占用3个cache line，多个warp同时运行导致cache line eviction，导致cache line没有使用的地方被evict掉，让memory bandwidth浪费很多。
+
+如果使用AoS的话，每个warp的每个iteration只占用1个cache line，多个warp同时运行不太容易导致cache line eviction，每个cache line被load了以后更充分的被使用了（访问三个元素而不是一个元素），充分利用memory bandwidth。
+
+这里之所以使用AoS，是因为（1）在iteration内 （2）threads within warp访问array上同样的数据。
+
+当使用SoA的时候，threads within warp访问array上contiguous data，所以使用SoA好
+
+
+
+硬件上的原因：constant cache on some old device have insufficent entries to accomadate all warps within sm
+
+
+
+##### Thread Coarsening
+
+* 两种方法
+
+1. for loop unroll
+   1. 减少用于branch control的instruction
+   2. 但是访问了更多的内存，有更大的latency，需要更多的warp来hide latency
+2. 处理多个element n
+   1. 减少对m的总访问次数（原来是每个n都需要访问全部的m）。现在对于每个load的m，可以应用于多个n的计算。
+   2. register overhead
+
+
+
+#### Instruction
+
+##### SFU
+
+对于sin cos的计算，在检验过正确性后，使用SFU (`__sin`)来进行计算，从而减少所需要执行的num instruction
+
+
+
+### Bezier Curves
+
+> Reference
+>
+> 1. Programming Massive Parallel Processors Chapter 13.7
+
+
+
+* 特点
+
+data dependent parallelisim
+
+the larger the curvature, the more points it takes to draw smooth curve 
+
+<img src="Note.assets/Screen Shot 2022-07-26 at 4.33.35 PM.png" alt="Screen Shot 2022-07-26 at 4.33.35 PM" style="zoom:50%;" />
+
+
+
+#### Simple CUDA Version
+
+每个thread block负责一个3 point bezier curve
+
+all thread一起计算rendered point
+
+每个thread block由于不同bezier curve的curvature不同，所需要计算的rendered point个数也不同，导致每个thread block的工作也不同
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-26 at 4.44.20 PM.png" alt="Screen Shot 2022-07-26 at 4.44.20 PM" style="zoom:80%;" />
+
+
+
+#### Dynamic Parallelism
+
+原来for loop内部的工作作为child block，forloop外面的工作作为parent block
+
+one thread in each parent kernel 计算 curvature & num of rendered point & allocate dynamic memory & call child kernel
+
+memory for storing the rendered point is dynamically allocated
+
+避免的block imbalance
+
+这里launch child kernel的时候使用null stream，为了更好的parallel效果可以使用per thread named stream
+
+<img src="Note.assets/Screen Shot 2022-07-26 at 4.45.19 PM.png" alt="Screen Shot 2022-07-26 at 4.45.19 PM" style="zoom:80%;" />
+
+
+
+### Computational Fluid Dynamic & Quad Tree
+
+> Reference
+>
+> 1. Programming Massive Parallel Processors chapter 13.8
+> 2. UIUC ECE 508 Lecture 9
+
+
+
+computation fluid dynamic 需要在每个iteration重新进行quad tree的计算。
+
+在没有dynamic parallel之前，是在CPU上build quad tree，传输quad tree到GPU上，然后在GPU上使用quad tree
+
+在有了dynamic parallel之后，可以在GPU上build & use quad tree，避免了moving data over PCIe，带来很大的速度提升
+
+
+
+具体实现细节参考slides + textbook
+
+
+
+### Parallel Merge Sort
+
+> Reference
+>
+> 1. UIUC ECE 508 Lecture 11
+> 2. Programming Massive Parallel Processors chapter 11
+
+
+
+
+
+
+
+### Parallel Graph Search BFS
+
+> Reference
+>
+> 1. Programming Massive Parallel Processors chapter 12
+> 2. UIUC ECE 508 Lecture 7
 

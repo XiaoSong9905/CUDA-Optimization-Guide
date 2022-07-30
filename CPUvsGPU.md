@@ -1,14 +1,10 @@
-
+## CPU vs GPU
 
 > Reference
 >
 > 1. Berkeley CS 267 Lecture 7
 > 2. UIUC 408 L1
 > 3. Programming Massively Parallel Processors 3rd chapter 1
-
-
-
-## CPU vs GPU
 
 
 

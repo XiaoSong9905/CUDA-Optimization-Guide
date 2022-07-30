@@ -1,5 +1,3 @@
-
-
 ## Common Optimization Techniques
 
 > Reference
@@ -370,7 +368,7 @@ GPU上由于thread的总数量很多，使用privitization需要注意
 
 
 
-### Cutoff
+### Cutoff Binning
 
 > Reference
 >
@@ -387,6 +385,16 @@ GPU上由于thread的总数量很多，使用privitization需要注意
 * 为什么用
 
 为了解决data scalability的问题，使用近似算法从而得到 linear complexity的结果
+
+cutoff binning允许O(n)复杂度算法
+
+
+
+* 特点
+
+cutoff binning对于cpu来说容易adopt，因为CPU可以使用scatter的方法
+
+cutoff binning对于gpu来说难adopt，因为gpu使用gather的方法
 
 
 

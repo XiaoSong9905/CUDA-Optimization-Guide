@@ -13,6 +13,10 @@
 
 
 
+pointer arre used to point to data objects in global memory
+
+
+
 * latency 
 
 | type                       | clock cycle                             |
@@ -26,15 +30,28 @@
 
 
 
+* 为什么重视内存访问
+
+对于GPU programming来说，one must have a clear understanding of the desirable (e.g., gather in CUDA) and undesirable (e.g., scatter in CUDA) memory access behaviors to make a wise decision.
+
+
+
 ## Computation Capacity
 
 > Reference
 >
 > 1. CUDA C++ Programming Guide chapter 
+> 1. Wiki CUDA [link](https://en.wikipedia.org/wiki/CUDA)
 
 
 
-### 3.x
+### 1.x Tesla
+
+### 2.x Fermi
+
+
+
+### 3.x Kepler
 
 #### Resource
 
@@ -112,7 +129,7 @@ thread in warp access any sub-word within the same 32-bit word or within two 32-
 
 
 
-### 5.x
+### 5.x Maxwell
 
 #### Resource
 
@@ -168,7 +185,7 @@ A shared memory request for a warp does not generate a bank conflict between two
 
 
 
-### 6.x
+### 6.x Pascal
 
 #### Resource
 
@@ -205,7 +222,7 @@ same as 5.x
 
 
 
-### 7.x
+### 7.x Volta & Turing
 
 #### Resource
 
@@ -255,7 +272,7 @@ shared memory bank same as 5.x
 
 
 
-### 8.x
+### 8.x Ampere
 
 #### Resource
 
@@ -289,6 +306,12 @@ global same as 5.x
 shared memory bank same as 5.x
 
 shared memory configuration same as 7.x
+
+
+
+### 9.x Hopper & Lovelace
+
+
 
 
 
@@ -843,7 +866,8 @@ host memory -> device global memory 的拷贝是有overhead的。
 * 使用时需要注意
 
 1. 使用shared memory一定要注意不要忘记synchronize的使用
-2. shared memory时有限的resource，需要考虑使用shared memory以后一个sm能有多少个thread和block
+2. 从Volta开始，warp内部不是lock step的，所以warp内部使用shared memory有时候也需要memory fence
+3. shared memory时有限的resource，需要考虑使用shared memory以后一个sm能有多少个thread和block
 
 
 
@@ -1087,10 +1111,11 @@ wait until all instruction in pipe object have been executed
 
 ## Constant cache
 
-* 特点
+#### 特点
 
 1. Read only
 2. higher throughput than L1 cache. Same 5 cycle latency as L1 cache.
+3. each time when a constant is access from cache, it can be broadcast to all threads in a warp. this makes constant memory almost as efficent as registers
 
 
 
@@ -1396,6 +1421,93 @@ compute capability 5.x and 6.x, local memory accesses are always cached in L2 in
 
 ## Atomic
 
+CUDA provides atomic functions that perform read-modify-write atomic operations on 32-bits or 64-bits of global memory or shared memory. 用于32 bit和64bit的atomic操作
+
+三种主要atomic类型：arithmetic functions, bitwise functions, and swap functions. 
+
+
+
+<img src="Note.assets/Screen Shot 2022-07-28 at 10.25.43 PM.png" alt="Screen Shot 2022-07-28 at 10.25.43 PM" style="zoom:50%;" />
+
+
+
+#### CAS
+
+> Referece
+>
+> 1. Professional CUDA C Programming Guide chapter 7
+
+
+
+CAS compare and swap 是一切atomic operation的基础，全部的atomic 操作都可以使用CAS实现。虽然实际上CUDA atomic都是naively supported的
+
+CAS takes as input three items: A memory location, an expected value at that memory location, and the value you would like to store at that memory location.
+
+CAS进行下面的三个步骤
+
+<img src="Note.assets/Screen Shot 2022-07-28 at 10.20.24 PM.png" alt="Screen Shot 2022-07-28 at 10.20.24 PM" style="zoom:50%;" />
+
+
+
+#### Implement your own atomic
+
+* build float atomic add with float CAS
+
+之所以使用while loop，是因为在add value to dst的时候，可能存在数据被改变，所以使用while loop来确定expected确实等于我设定的值
+
+这里的while loop和thread写入产生conflict的replay很像（see below)
+
+这里有个非常重要的店：it's safe to read memory location that's being atomically modify by other thread
+
+```cpp
+__device__ int myAtomicAdd(int *address, int incr) 
+{
+	// Create an initial guess for the value stored at *address. 
+  int expected = *address;
+  int oldValue = atomicCAS(address, expected, expected + incr);
+	// Loop while expected is incorrect. 
+  while (oldValue != expected) {
+		expected = oldValue;
+		oldValue = atomicCAS(address, expected, expected + incr); 
+  }
+	return oldValue; 
+}
+```
+
+
+
+* build non-existing atomic with existing atomic
+
+通过使用type conversion intrinsic，从而使用已经存在的atomic function实现不存在的data type 的atomic function
+
+```cpp
+__device__ float myAtomicAdd(float *address, float incr) 
+{
+	// Convert address to point to a supported type of the same size 
+  unsigned int *typedAddress = (unsigned int *)address;
+	// Stored the expected and desired float values as an unsigned int 
+  float currentVal = *address;
+	unsigned int expected = __float2uint_rn(currentVal);
+	unsigned int desired = __float2uint_rn(currentVale + incr);
+	int oldIntValue = atomicCAS(typedAddress, expected, desired); 
+  
+  while (oldIntValue != expected) 
+  {
+		expected = oldIntValue;
+    /*
+    * Convert the value read from typedAddress to a float, increment, 
+    * and then convert back 	to an unsigned int
+    */
+    desired = __float2uint_rn(__uint2float_rn(oldIntValue) + incr);
+    oldIntValue = atomicCAS(typedAddress, expected, desired); 
+	}
+	
+  return __uint2float_rn(oldIntValue); 
+}
+```
+
+
+
 
 #### Non-atomic write behavior
 
@@ -1434,7 +1546,7 @@ atomic 操作的latency = dram load latency + internal routing + dram store late
 
 
 
-modern GPU支持在last level cache上进行atomic操作，也就把atomic的latency从few hunderdes cycle变为了few tens cycle. 这个优化不需要任何programmer的更改，是通过使用更先进的hardware来实现的。
+modern GPU支持在last level cache上进行atomic操作(应该是只有shared memory atomic)，也就把atomic的latency从few hunderdes cycle变为了few tens cycle. 这个优化不需要任何programmer的更改，是通过使用更先进的hardware来实现的。
 
 
 
@@ -1510,6 +1622,38 @@ the flexibility of atomic is changed. now have atomic within warp / block.
 
 
 
+* computation capacity 1.1
+
+32-bit atomic in global memory
+
+
+
+* computation capacity 1.2
+
+32-bit atomic in shared memory
+
+64 bit atomic in global memory 
+
+
+
+* computation capacity 2.0
+
+64 bit atomic in shared memory 
+
+
+
+#### Replay
+
+> Reference
+>
+> 1. Professional CUDA C Programming Guide chapter 7
+
+Conflicting atomic accesses to a shared location might require one or more retries by conflicting threads, analogous to running more than one iteration of myAtomicAdd’s loop. 如果多个thread 对于同一个memory location进行atomic操作，在同一时间只会有一个thread成功，其余的thread会被replay
+
+If multiple threads in a warp issue an atomic operation on the same location in memory, warp execution is serialized. Because only a single thread’s atomic operation can succeed, all others must retry. If a single atomic instruction requires n cycles, and t threads in the same warp execute that atomic instruction on the same memory location, then the elapsed time will be t×n, as only one thread is successful on each successive retry. rest of the threads in the warp are also stalled waiting for all atomic operations to complete. 在warp内如何threads atomic concurrent的写入同一个memory location，则会产生retry。当某一个thread retry的时候，其余的thread会像是branch divergence一样stall
+
+
+
 #### Warp-aggregated
 
 > Reference
@@ -1527,6 +1671,20 @@ NVCC compiler (from CUDA 9) now performs warp aggregation for atomics automatica
 atoimc次数与bandwidth是log的反向相关。下图中的横轴可以理解为number of atomic operation.
 
 <img src="Note.assets/image2.png" alt="Figure 1. Performance of filtering with global atomics on Kepler K80 GPU (CUDA 8.0.61)." style="zoom:60%;" />
+
+
+
+## Synchronization
+
+A kernel call is asynchronous with respect to the host thread. After a kernel is invoked, control returns to the host side immediately. 启动device kernel是async的。
+
+
+
+#### Implicit Sync
+
+* cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind);
+
+implicit synchronization at the host side is performed and the host application must wait for the data copy to complete.
 
 
 
@@ -1687,7 +1845,17 @@ Register 也会有bank conflict，只不过这是完全由compiler处理的，pr
 
 
 
-### Memory Fence
+### Unified memory
+
+在没有unified memory的情况下，在CPU上deref GPU ptr会导致runtime crash。
+
+从CUDA 6开始，使用unified address space，一个ptr可以同时在cpu gpu上使用。 
+
+
+
+
+
+### Memory Fence & memory consistency
 
 > Reference
 >
