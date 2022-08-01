@@ -253,6 +253,8 @@ every N value reused T time
 
 6. readability as sequential code 。与sequential code一致都有for loop的存在，更好理解代码
 
+7. 在unroll loop的时候，loop body变得更大了，可以更好的使用ILP
+
 
 
 * 缺点

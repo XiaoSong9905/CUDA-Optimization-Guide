@@ -1,7 +1,5 @@
 # Memory Model
 
-
-
 ## Memory Hierarchy
 
 > Reference
@@ -36,286 +34,7 @@ pointer arre used to point to data objects in global memory
 
 
 
-## Computation Capacity
-
-> Reference
->
-> 1. CUDA C++ Programming Guide chapter 
-> 1. Wiki CUDA [link](https://en.wikipedia.org/wiki/CUDA)
-
-
-
-### 1.x Tesla
-
-### 2.x Fermi
-
-
-
-### 3.x Kepler
-
-#### Resource
-
-* Each SM contain
-
-1. 192 CUDA core for arithmetic op
-2. 32 special function unit for single precision float
-3. 4 warp scheduler
-4. L1 cache 用于 local memory
-   1. cc 3.5 3.7 可以opt-in to cache global memory access on both L1 & L2 通过compiler `-Xptxas -dlcm=ca`，但是默认global memory访问不经过L1 
-
-5. shared memory (same chip with L1)
-   1. configurable partition with L1
-   2. The initial configuration is 48 KB of shared memory and 16 KB of L1 cache.
-
-6. read-only data cache of 48 KB 用于device memory
-   1. cc 3.5 3.7 可以在global memory访问的时候也使用
-
-
-
-
-* across SM contain
-
-1. 1.5MB L2 cache 用于 local memory & global memory
-
-
-
-#### schedule
-
-dynamic assign warp to warp scheduler
-
-each warp scheduler issue 2 independent instruction per clock cycle
-
-
-
-#### global memory & constant memory 
-
-L1&L2 cache line 128 bytes
-
-L1 & L2 : 128 bytes memory transaction 
-
-L2 only : 32 bytes memory transaction
-
-
-
-#### shared memory bank
-
-32 banks 
-
-每个bank的bandwidth is 64 bits / clock
-
-两个addresssing mode
-
-
-
-* 64 bit / 8 bytes mode 
-
-Successive 64-bit words map to successive banks. 每个bank放8个bytes，连续的bank放连续的内存
-
-threads in warp access sub-word within same 64 bit word不产生bank conflict，尽管这个word是在一个bank内。
-
-1. read access：64 bits word会被broadcast到全部的threads
-2. write access：warp内只有一个thread会发生write，具体是哪个thread是undefined的
-
-
-
-* 32 bit / 4 bytes mode
-
-Successive 32-bit words map to successive banks. 每个bank放8个bytes，连续的bank放连续的内存
-
-thread in warp access any sub-word within the same 32-bit word or within two 32-bit words whose indices i and j are in the same 64-word aligned segment 不产生bank conflict，尽管这个word是在一个bank内
-
-1. read access：broadcast
-2. write access：warp内只有一个thread会发生write，具体是哪个thread是undefined的
-
-
-
-### 5.x Maxwell
-
-#### Resource
-
-* each SM contain
-
-1. 128 CUDA core for arithmetic op
-2. 32 special function unit for single precision float
-3. 4 warp scheduler
-4. L1 cache/texture cache 在某些条件下可以通过config来用于访问global memory
-   1. default not enable L1 cache for global memory access
-5. shared memory
-6. read-only constant cache 用于 constant memory space
-   1. cc 3.5 3.7 可以在global memory访问的时候也使用
-
-
-
-* across SM
-
-1. L2 cache 用于 local or global memory
-
-
-
-#### Schedule
-
-dynamic assign warp to warp scheduler
-
-each warp scheduler issue 1 instruction per clock cycle
-
-
-
-#### global memory & constant memory 
-
-L2 only : 32 bytes memory transaction
-
-cc 5.0 + read only : 可以通过 `__ldg()` 使用L1 cache，依旧是32 bytes memory transaction
-
-cc 5.2 : 可以通过compiler option使用L1 cache，依旧是32 bytes memory transaction.
-
-default都是不适用L1 cache for global memory access
-
-
-
-#### shared memory bank
-
-32 banks, successive 32-bit words map to successive banks. 
-
-Each bank has a bandwidth of 32 bits per clock cycle.
-
-A shared memory request for a warp does not generate a bank conflict between two threads that access any address within the same 32-bit word
-
-1. read : broadcast 
-2. write : only one thread write, which one is undefined
-
-
-
-### 6.x Pascal
-
-#### Resource
-
-* Each SM core
-
-1. 64 (cc 6.0) / 128 (cc 6.1 & 6.2) CUDA core for arithemetic
-2. 16 (cc 6.0) / 32 (cc 6.1 & 6.2) special function unit for single precision float 
-3. 2 (cc 6.0) / 4 (cc 6.1 & 6.2) warp scheduler 
-4. read-only constant cache 用于 read from constant memory space
-5. L1/texture cache 用于read from global memory 
-   1. default enable L1 cache when access global memory
-6. shared memory
-
-
-
-* across SM
-
-1. L2 cache 用于 local or global memory
-
-
-
-
-#### Schedule
-
-dynamic assign warp to warp scheduler
-
-each warp scheduler issue 2 independent instruction per clock cycle
-
-
-
-#### global memory & shared memory
-
-same as 5.x
-
-
-
-### 7.x Volta & Turing
-
-#### Resource
-
-* each SM
-
-1. 64 FP32 cores for single-precision arithmetic operations,
-2. 32 FP64 cores for double-precision arithmetic operations, 33
-3. 64 INT32 cores for integer math,
-4. 8 mixed-precision Tensor Cores for deep learning matrix arithmetic
-5. 16 special function units for single-precision floating-point transcendental functions,
-6. 4 warp schedulers
-7. read only constant cache 用于 constant memory space
-8. unified L1 & shared memory of size 128 KB (volta) / 96 KB (Turing)
-   1. can be configued. 
-   2. driver automatically configures the shared memory capacity for each kernel to avoid shared memory occupancy bottlenecks while also allowing concurrent execution with already launched kernels where possible. In most cases, the driver's default behavior should provide optimal performance. 自动config shared memory的大小，大多数情况是optimal的
-   3. default enable L1 cache for global memory access
-
-
-
-#### Schedule
-
-static distribute warp among schedulers
-
-each scheduler issue one instruction for one of its assigned warp per clock cycle
-
-支持independent thread scheduling
-
-
-
-#### global memory
-
-Same as 5.x
-
-
-
-#### shared memory
-
-driver会自动选择optimal conf
-
-使用cudaFuncSetAttribute() 设定shared memory比例 on per kernel bases，现在是一个hint，driver可以选择运行其余的config
-
-原来使用cudaFuncSetCacheConfig()设定shared memory比例，这是一个强制要求的API
-
-
-
-shared memory bank same as 5.x
-
-
-
-### 8.x Ampere
-
-#### Resource
-
-* each SM have 
-
-1. 64 FP32 cores for single-precision arithmetic operations in devices of compute capability 8.0 and 128 FP32 cores in devices of compute capability 8.6,
-2. 32 FP64 cores for double-precision arithmetic operations in devices of compute capability 8.0 and 2 FP64 cores in devices of compute capability 8.6
-3. 64 INT32 cores for integer math,
-4. 4 mixed-precision Third Generation Tensor Cores supporting half-precision (fp16), __nv_bfloat16, tf32, sub-byte and double precision (fp64) matrix arithmetic (see Warp matrix functions for details),
-5. 16 special function units for single-precision floating-point transcendental functions,
-6. 4 warp schedulers.
-7. read only constant cache
-8. unified L1 & shared memory
-   1. can be configed 
-   2. default enable L1 cache for global memory access
-
-
-
-#### schedule
-
-static distribute warp to scheduler
-
-each scheduler issue 1 instruction each clock cycle
-
-
-
-#### global and shared memory
-
-global same as 5.x
-
-shared memory bank same as 5.x
-
-shared memory configuration same as 7.x
-
-
-
-### 9.x Hopper & Lovelace
-
-
-
-
-
-## Global memory
+## Global Memory
 
 ### Bandwidth
 
@@ -438,7 +157,7 @@ $$
 
 
 
-### DRAM
+### Device Memory DRAM
 
 > Reference
 >
@@ -555,7 +274,7 @@ modern Double data rate （DDR） bus可以传输two word of data in each clock 
 
 
 
-### Memory-coarlesed
+### Memory Coarlesed & Aligned
 
 > Reference
 >
@@ -564,50 +283,318 @@ modern Double data rate （DDR） bus可以传输two word of data in each clock 
 > 3. NVIDIA Tech Blog Coalesced Transaction Size [link](https://forums.developer.nvidia.com/t/coalesced-transaction-size/24602)
 > 4. Blog CUDA基础 4.3 内存访问模式 [link](https://face2ai.com/CUDA-F-4-3-内存访问模式/)
 > 5. CUDA C++ Best Practices Guide chapter 9.2.1
+> 6. Professional CUDA C Programming chapter 4
+> 7. CUDA C++ Programing Guide chapter K.3
+> 8. CUDA C++ Programming Guide chapter 3.2.2
+> 9. CUDA C++ Programming Guide chapter 5.3.2
+> 10. NVIDIA Tech Blog Cache behavior when loading global data to shared memory in Fermi [link]
+> 11. NVIDIA Tech Blog Coalesed Transaction Size [link](https://forums.developer.nvidia.com/t/coalesced-transaction-size/24602)
 
 
 
-#### 是什么
+#### What is memory Coarlesed
 
- Global memory loads and stores by threads of a warp are coalesced by the device into as few as possible transactions。硬件会融合一个warp内对内存的多个访问为几个访问
+Memory operations are also issued per warp. When executing a memory instruction, each thread in a warp provides a memory address it is loading or storing. Cooperatively, the 32 threads in a warp present a single memory access request comprised of the requested addresses, which is serviced by one or more device memory transactions. 对于内存的request是以warp为单位进行issue的而不是thread为单位进行的。warp内的多个thread访问内存地址首先会以warp为单位合并为一个warp memory request，这个warp memory request由一个或者多个memory transaction满足。具体使用几个memory transaction取决于warp memory request访问的数据范围以及每个memory transaction的大小。一个memory transaction可以理解为一个ISA层面的memory 访问
 
-previous GPU中的cache主要作用是memory coalesing，来combine access to DRAM into burst to reduce 总的 num access to DRAM
+global memory request一定会经过L2，是否经过L1取决于cc和config，是否经过read only texture cache取决于cc和code。(Figure 4.6)
 
-
-
-* CPU memory coarlesed
-
-因为CPU有很大的cache，L1 L2是per core的，所以每一个CPU thread访问连续的一段内存是memory coarlesed的。
-
-CPU thread1有自己的cache，CPU thread2有自己的cache，这两个cache不干扰。
+<img src="Note.assets/Screen Shot 2022-08-01 at 1.32.01 PM.png" alt="Screen Shot 2022-08-01 at 1.32.01 PM" style="zoom:50%;" />
 
 
 
-* GPU memory coarlesed
+* CPU充分利用memory bandwidth
 
-因为GPU有较小的cache，一个SM内的多个thread会共享L1 cache。对GPU的连续内存访问需要以warp为单位进行考虑。warp内的32个thread是否访问连续的32个内存空间。
+CPU有很大的cache，CPU thread访问连续的内存会被cache在per CPU Core的cache中。不同的CPU thread由于有不同的core，读取的数据会被不同的core的cache保存，所以不相互影响。
+
+对于CPU来说，充分利用内存的方法是每个core负责一段连续的内存。e.g. thread 1 : array0-99; thread 2 : array 100-199; thread 3 : array 200-299.
+
+
+
+* GPU 充分利用memory bandwidth
+
+GPU的cache小，一个SM内的多个thread会共享L1 cache。thread0读取数据产生的cache会对thread1读取数据产生的cache产生影响。而且GPU是以warp为单位来issue memory request的。
 
 when many warps execute on the same multiprocessor simultaneously, as is generally the case, the cache line may easily be evicted from the cache between iterations i and i+1. CUDA中充分利用bandwidth需要warp内的threads在某一个iteration/timestep内花费全部transaction data segment / cache line， 因为有很多warp同时在sm上运行，等下一个iteration的时候 cache line/DRAM buffer已经被清空了。
 
 
 
-* Compute capacity 6.0+
+* 常用优化方法
 
-transaction会被合并为多个32 bytes transaction
-
-默认使用L1 cache，但是依旧传输单位是32 bytes
-
-the concurrent accesses of the threads of a warp will coalesce into a number of transactions equal to the number of 32-byte transactions necessary to service all of the threads of the warp.
-
+1. aligned and coarlesed memory access 从而确保充分利用bandwidth
+2. sufficent concurrent memory operation 从而确保可以hide latency
+   1. loop unroll 从而增加independent memory access per warp, 减少hide latency所需要的active warp per sm
+   2. modify execution configuration 从而确保每个SM都有足够的active warp。
 
 
-* compute capacity 3.4, 3.7, 5.2
 
-如果使用L1 cache，transaction会被合并为多个128 bytes transaction
+#### What is memory Aligned
 
-如果没有使用L1 cache，transaction会被合并为多个32 bytes aligned segments
+Aligned memory accesses occur when the first address of a device memory transaction is an even multiple of the cache granularity being used to service the transaction (either 32 bytes for L2 cache or 128 bytes for L1 cache). Performing a misaligned load will cause wasted bandwidth. 
+
+Warp memory request的起始位置是cache line的偶数倍。如果使用L1 128bytes cache line的话则需要起始位置是128 bytes的偶数倍。如果使用L2 32 bytes cache line的话则需要起始位置是32 bytes的偶数倍
 
 
+
+* image library
+
+当读取image 文件的时候，library经常会padded width = multiply of burst size. 
+
+如果没有padded的话，raw 1的起始位置会是misaligned from DRAM burst，导致读取的时候多读几个burst/memory segment，让速度变慢
+
+padded info叫做 `pitch` 
+
+<img src="Note.assets/IMG_463A2479525D-1.jpeg" alt="IMG_463A2479525D-1" style="zoom:50%;" />
+
+
+
+* CUDA API
+
+使用CUDA API分配数据是会align 256 bytes的
+
+```cpp
+// 1d, aligned to 256 bytes
+cudaMalloc();
+cudaMemcpy();
+cudaFree();
+
+// 2d 分配, aligned to 256 bytes
+cudaMallocPitch();
+cudaMemcpy2D();
+
+// 3d, aligned to 256 bytes
+cudaMalloc3D();
+cudaMemcpy3D();
+```
+
+
+
+* Align on struct
+
+Global memory instructions support reading or writing words of size equal to 1, 2, 4, 8, or 16 bytes. If this size and alignment requirement is not fulfilled, the access compiles to multiple instructions with interleaved access patterns that prevent these instructions from fully coalescing. CUDA支持的数据大小是1,2,4,8,16. 如果自定义的struct不是这些大小的话，则会导致产生多个non coarlesed transaction。
+
+如果一个struct是7 bytes，那么padding成8 bytes会用coarlesed access。但是如果不paddig的话则会是多个transaction。
+
+下面的marcro可以align struct从而确保coarlesed access
+
+```cpp
+struct __align__(16) {
+  float x;
+  float y;
+  float z; 
+};
+```
+
+
+
+#### Global Memory Read
+
+注意： GPU L1 cache is designed for spatial but not temporal locality. Frequent access to a cached L1 memory location does not increase the probability that the data will stay in cache. L1 cache是用于spatial（连续读取array）而不是temporal（读取同一个位置的），因为cache line很容易被其余的thread evict。
+
+
+
+* global memory load efficency
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.40.23 PM.png" alt="Screen Shot 2022-08-01 at 2.40.23 PM" style="zoom:50%;" />
+
+nvprof 里面 gld_efficency metrics 就衡量了和这个
+
+
+
+* Simple model
+
+在128 bytes/32 bytes的模式下，会产生128 bytes/ 32 bytes / 64 bytes的memory transaction （32 bytes当four segment的时候也会是128 bytes）。如果不考虑的那么仔细，那么可以粗略的认为Global memory resides in device memory and device memory is accessed via 32-, 64-, or 128- byte memory transactions.
+
+
+
+##### Read-only texture cache
+
+CC 3.5+ 可以使用read only texture cache
+
+The granularity of loads through the read-only cache is 32 bytes. 
+
+
+
+##### CC 2.x Fermi
+
+2.x default 使用 L1 + L2 cache
+
+2.x 可以通过config disable L1 cache
+
+```shell
+// disable L1 cache
+-Xptxas -dlcm=cg
+
+// enable L1 cache
+-Xptxas -dlcm=ca
+```
+
+
+
+* 当使用L1 + L2 128 bytes transaction的时候
+
+If the size of the words accessed by each thread is more than 4 bytes, a memory request by a warp is first split into separate 128-byte memory requests that are issued independently. 如果每个thread请求的数据大于4 bytes（32 * 4 = 128)，则会被切分为多个128 bytes memory request来进行。
+
+如果每个thread请求8 bytes，two 128-bytes memory request, one for each half-warp. 这样保证了每个传送的128 bytes数据都被充分利用(16 threads * 8 bytes each)
+
+如果每个thread请求16 bytes，four 128-bytes memory requesy, one for each quarter-warp. 这样保证了传送的128 bytes数据被充分利用
+
+
+
+每一个memory request会进一步被broken down to cache line request 然后issue independently
+
+
+
+The addresses requested by all threads in a warp fall within one cache line of 128 bytes. Only a single 128-byte transaction is required to complete the memory load operation. 
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.24.59 PM.png" alt="Screen Shot 2022-08-01 at 2.24.59 PM" style="zoom:50%;" />
+
+
+
+access is aligned and the referenced addresses are not consecutive by thread ID, but rather randomized within a 128-byte range. Because the addresses requested by the threads in a warp still fall within one cache line, only one 128-byte transaction is needed to fulfill this memory load operation. 只要warp memory request是在128 bytes transaction内，只会进行一个memory transaction。
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.26.20 PM.png" alt="Screen Shot 2022-08-01 at 2.26.20 PM" style="zoom:50%;" />
+
+
+
+warp requests 32 consecutive four-byte data elements that are not aligned. The addresses requested by the threads in the warp fall across two 128-byte seg- ments in global memory. Because the physical load operations performed by an SM must be aligned at 128-byte boundaries when the L1 cache is enabled, two 128-byte transactions are required to ful- fill this memory load operation. 由于misalign导致产生两个128 bytes transaction
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.27.40 PM.png" alt="Screen Shot 2022-08-01 at 2.27.40 PM" style="zoom:50%;" />
+
+
+
+ all threads in the warp request the same address
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.32.37 PM.png" alt="Screen Shot 2022-08-01 at 2.32.37 PM" style="zoom:50%;" />
+
+
+
+threads in a warp request 32 four-byte addresses scattered across global memory.
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.28.42 PM.png" alt="Screen Shot 2022-08-01 at 2.28.42 PM" style="zoom:50%;" />
+
+
+
+* 当使用L2 only 32 bytes transaction的时候
+
+performend at granularity of 32 bytes memory segments
+
+Memory transactions can be one, two, or four segments at a time. 注意这里是说一次memory transaction是one segment long / two segment long / four segment long. 尽管是four segment long 但是依旧是one memory transaction. 
+
+
+
+The addresses for the 128 bytes requested fall within four segments, and bus utilization is 100 percent.
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.31.39 PM.png" alt="Screen Shot 2022-08-01 at 2.31.39 PM" style="zoom:50%;" />
+
+
+
+memory access is aligned and thread accesses are not sequential, but randomized within a 128-byte range.
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.32.05 PM.png" alt="Screen Shot 2022-08-01 at 2.32.05 PM" style="zoom:50%;" />
+
+
+
+all threads in the warp request the same data
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.32.59 PM.png" alt="Screen Shot 2022-08-01 at 2.32.59 PM" style="zoom:50%;" />
+
+
+
+warp requests 32 4-byte words scattered across global memory. 
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.33.23 PM.png" alt="Screen Shot 2022-08-01 at 2.33.23 PM" style="zoom:50%;" />
+
+
+
+##### CC 3.x Kepler
+
+3.x default 使用 L2 cache，不使用L1 cache
+
+3.5 / 3.7 可以使用read only texture cache
+
+3.5 / 3.7 可以config使用L1 cache
+
+L1 cache line size 128 bytes
+
+L2 cache line size 32 bytes
+
+当使用L2 cache only的时候，memory transaction是32 bytesEach memory transaction may be conducted by one, two, or four 32 bytes segments。可以减少over-fecth
+
+当使用L1 + L2 cache的时候，memory transaction是128 bytes. Memory request 首先会去L1，如果L1 miss会去L2，如果L2 miss会去DRAM。
+
+
+
+memory transaction在使用L1+L2 / L2 only的时候，与 Fermi 一样
+
+
+
+##### CC 5.x Maxwell
+
+5.x default使用L2 cache，行为与3.x使用L2 cache only一样，是32 bytes transaction
+
+5.x 可以使用read only texture cache，是32 bytes transaction
+
+5.x 可以config使用L1 cache（default不使用）
+
+
+
+> TODO 不确定使用L1 cache的情况下的memory transaction
+
+
+
+##### CC 6.x Pascal
+
+
+
+> TODO 不确定使用L1 cache的情况下的memory transaction
+>
+> 不确定是否default enable L1 cache
+
+
+
+#### Global Memory Write
+
+The L1 cache is not used for store operations on either Fermi or Kepler GPUs, store operations are only cached in the L2 cache before being sent to device memory. 只用L2会被write使用，L1不被write使用。
+
+Stores are performed at a 32-byte segment granularity. Memory transactions can be one, two, or four segments at a time.
+
+If a non-atomic instruction executed by a warp writes to the same location in global memory for more than one of the threads of the warp, only one thread performs a write and which thread does it is undefined. 如果多个thread non-atomic写入同一个global memory address，只有一个thread写入会被进行（不会replay），但是具体是哪个thread是不确定的
+
+
+
+* efficency 
+
+memory store efficency 与 memory load efficency的定义相似
+
+nvprof 里面 gst_efficency metrics 就衡量了和这个
+
+
+
+* transaction & segment 
+
+If two addresses fall within the same 128-byte region but not within an aligned 64-byte region, one four-segment transaction will be issued (that is, issuing a single four-segment transaction performs better than issuing two one-segment transactions). 当传送4 segment的时候，依旧是one memory transaction。1 four segment memory transaction的速度是大于 2 two segment memory transaction的速度的.
+
+when a 128-byte write request is issued from a warp, the request will be serviced by one four-segment transaction and one one-segment transaction. Therefore, 128 bytes were requested and 160 bytes were loaded, resulting in 80 percent efficiency. 在write的时候如果128 bytes misaligned，则会产生1 four segment transaction和1 one segment transaction.
+
+
+
+* Example
+
+memory access is aligned and all threads in a warp access a consecutive 128-byte range. store request is serviced by one four-segment transaction.
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.45.31 PM.png" alt="Screen Shot 2022-08-01 at 2.45.31 PM" style="zoom:50%;" />
+
+
+
+Memory access is aligned, but the addresses are scat- tered along a 192-byte range. This store request is serviced by three one-segment transactions.
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.46.31 PM.png" alt="Screen Shot 2022-08-01 at 2.46.31 PM" style="zoom:50%;" />
+
+
+
+memory access is aligned and the addresses accessed are in a consecutive 64-byte range. This store request is serviced with one two-segment transaction.
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 2.46.47 PM.png" alt="Screen Shot 2022-08-01 at 2.46.47 PM" style="zoom:50%;" />
 
 
 
@@ -630,190 +617,6 @@ the concurrent accesses of the threads of a warp will coalesce into a number of 
 蓝色的部分是core array到buffer的时间。红色的部分是buffer到pin的时间
 
 <img src="Note.assets/Screen Shot 2022-05-31 at 12.06.52 AM.png" alt="Screen Shot 2022-05-31 at 12.06.52 AM" style="zoom:50%;" />
-
-
-
-#### From Transaction
-
-> Reference
->
-> 1. CUDA C++ Programing Guide chapter K.3
-
-
-
-* Data request to coarlesed memory request
-
-if the size of the words accessed by each thread is more than 4 bytes, a memory request by a warp is first split into separate 128-byte memory requests that are issued independently: 如果每个warp内的thread访问的数据大于4 bytes（整个warp访问的数据大于128 bytes），则会分为多个128 bytes个issued instruction
-
-如果每个thread访问数据是8 bytes，则会issue 2 128 bytes memory request, one for each half-warp
-
-如果每个thread访问数据是16 bytes，则会issue 4 128 bytes memory request，one for each quarter warp
-
-
-
-* memory request to cache line request
-
-每个memory request is then broken down into cache line request, issue independently. 
-
-
-
-* 不是很确定下面的部分，还需要确定
-
-当一个内存事务的首个访问地址是缓存粒度（32或128字节）的偶数倍的时候：比如二级缓存32字节的偶数倍64，128字节的偶数倍256的时候，这个时候被称为对齐内存访问，非对齐访问就是除上述的其他情况，非对齐的内存访问会造成带宽浪费。
-
-
-
-#### Alignment & padding
-
-> Reference
->
-> 1. Programming Massively Parallel Processors 3rd edition Chapter 7
-
-<img src="Note.assets/IMG_463A2479525D-1.jpeg" alt="IMG_463A2479525D-1" style="zoom:50%;" />
-
-当读取image 文件的时候，library经常会padded width = multiply of burst size. 
-
-如果没有padded的话，raw 1的起始位置会是misaligned from DRAM burst，导致读取的时候多读几个burst/memory segment，让速度变慢
-
-padded info叫做 `pitch` 
-
-
-
-#### Driver/Runtime API on Align
-
-> Reference
->
-> 1. CUDA C++ Programming Guide chapter 3.2.2
-
-```cpp
-// 1d, aligned to 256 bytes
-cudaMalloc();
-cudaMemcpy();
-cudaFree();
-
-// 2d 分配, aligned to 256 bytes
-cudaMallocPitch();
-cudaMemcpy2D();
-
-// 3d, aligned to 256 bytes
-cudaMalloc3D();
-cudaMemcpy3D();
-```
-
-使用CUDA Runtime API分配的linear array内存1D/2D/3D会pad data来满足alignment requirement
-
-2D/3D会返回pitch/stride，需要使用这些stride来访问数据
-
-
-
-#### Stride access
-
-> reference
->
-> 1. CUDA C++ Best Practices Guide chapter 9.2.1
-
-
-
-non-unit-stride 是什么：thread in warp 访问有间隔/stride的memory，浪费bandwidth
-
-unit-stride 是什么：thread in warp 访问连续的内存，100%利用bandwidth/传送的memory segment
-
-
-
-<img src="Note.assets/Screen Shot 2022-06-26 at 12.37.25 PM.png" alt="Screen Shot 2022-06-26 at 12.37.25 PM" style="zoom:50%;" />
-
-
-
-
-
-#### Compiler alignment
-
-> Reference
->
-> 1. CUDA C++ Programming Guide chapter 5.2.3
-
-
-
-Global memory instructions support reading or writing words of size equal to 1, 2, 4, 8, or 16 bytes. Any access (via a variable or a pointer) to data residing in global memory compiles to a single global memory instruction if and only if the size of the data type is 1, 2, 4, 8, or 16 bytes and the data is naturally aligned (i.e., its address is a multiple of that size). 全部对global memory的访问都会被编译为1/2/4/8/16 bytes的访问 (e.g. 访问3 bytes的数据会被编译为两个指令，一个访问2 bytes，一个访问1 bytes）。
-
-如果访问global memory的大小不是1/2/4/8/16 bytes的话，则会被编译成多个内存访问instruction。
-
-这样导致warp对global memory的访问无法被coalesced. (e.g. 每个thread访问3 bytes数据，warp内的thread访问连续的内存，这时对global memory access是interleaved的，因为两个instruction，一个2 bytes，一个1 bytes，第一个step访问2 bytes interleaved，第二个step是访问1 bytes interleaved)
-
-
-
-* align struct
-
-```cpp
-// __align__(8) or __align__(16)
-struct __align__(8) {
-    float x;
-		float y; 
-};
-```
-
-
-
-#### Examples
-
-
-##### Example GEMM data access
-
-下面的例子中，每个thread沿着黑色的箭头访问4个元素。对于N的访问中每个thread访问一个column。对于M的访问中每个thread访问一个row。数据是row major order的
-
-
-
-* 对于N的访问
-
-是coarlesed的
-
-在step1中4个thread访问的内存（N00,N01,N02,N03，黄色的部分) 在virtual memory中是连续的（在物理内存上会被分配到多个bank，多个channel中）
-
-在step2中，访问新的连续的内存。
-
-<img src="Note.assets/Screen Shot 2022-05-31 at 12.09.35 AM.png" alt="Screen Shot 2022-05-31 at 12.09.35 AM" style="zoom:50%;" />
-
-
-
-* 对于M的访问
-
-不是coalesced的
-
-每个thread读取的数据都会导致一次memory burst。
-
-Step1的4个value(M00,M10,M20,M30)需要4个burst(每个burst对应一个颜色)。由于burst buffer只有一个，在step 1访问结束后只有最后访问的burst依旧留在burst buffer中。
-
-step2的4个value访问(M01,M11,M21,M31)需要重新传送4个burst。
-
-<img src="Note.assets/Screen Shot 2022-05-31 at 12.10.24 AM.png" alt="Screen Shot 2022-05-31 at 12.10.24 AM" style="zoom:50%;" />
-
-
-
-##### Example Aligned Coarlesed
-
-CUDA compute capacity 6.0
-
-each thread in warp access adjacent 4 byte words (e.g. float)
-
-start memory location is multiply of 32 bytes
-
-coalesed一共会产生 4 (bytes per thread) * 32 (threads in warp ) / 32 (bytes per aligned transaction) = 4 aligned transaction segment
-
-只要warp内的thread同时使用这个range的内存（就算是交叉的，混乱的）也会传输4个segment
-
-<img src="Note.assets/Screen Shot 2022-06-26 at 12.26.07 PM.png" alt="Screen Shot 2022-06-26 at 12.26.07 PM" style="zoom:50%;" />
-
-
-
-##### Example Misaligned
-
-如果start memory location不是multiply of 32 bytes (on cc 6.0), 则会传输额外的32 bytes segment
-
-<img src="Note.assets/Screen Shot 2022-06-26 at 12.29.40 PM.png" alt="Screen Shot 2022-06-26 at 12.29.40 PM" style="zoom:50%;" />
-
-
-
-如果多个warp对内存的访问是连续的misaligned的话，带来的bandwidth减少不是1/5, 而是1/10左右。因为cache会储存额外被传输的32 bytes segment
 
 
 
@@ -851,8 +654,8 @@ host memory -> device global memory 的拷贝是有overhead的。
 * 是什么
 
 1. on chip (For volta use same physical resources SRAM)
-2. SRAM support random access
-3. don't have constrain of burst like DRAM
+2. SRAM support random access, don't have constrain of burst like DRAM(global memory)
+3. shared memory latency is roughly 20 to 30 times lower than global memory, and bandwidth is nearly 10 times higher.
 
 
 
@@ -873,9 +676,9 @@ host memory -> device global memory 的拷贝是有overhead的。
 
 * load from global memory to shared memory 过程
 
-内存拷贝与CPU相似，需要经过register
+内存拷贝与CPU相似，需要经过register (CUDA11有async，不经过register的方法，see below section)
 
-global memory -> cache L1/L2 -> per thread register -> shared memory
+global memory -> cache (optional L1)L2 -> per thread register -> shared memory
 
 不存在直接从global memory到shared memory的硬件
 
@@ -887,7 +690,7 @@ By simply increasing this parameter (without modifying the kernel), it is possib
 
 
 
-##### API
+#### API
 
 * dynamic use
 
@@ -911,6 +714,44 @@ __shared__ float a[size_x][size_y];
 
 
 
+* config L1 cache & shared memory
+
+> Reference
+>
+> 1. Professional CUDA C Programming Guide chapter 5
+
+L1 + Shared 一共有64 kb memory
+
+shared memory使用32 bank访问。L1 cache使用cache line来访问。
+
+如果kernel使用很多shared memory，prefer larger shared memory
+
+如果kernel使用很多register，prefer larger L1 cache。因为register会spilling to L1 cache
+
+
+
+config for whole device
+
+```cpp
+cudaError_t cudaDeviceSetCacheConfig(cudaFuncCache cacheConfig);
+```
+
+<img src="Note.assets/Screen Shot 2022-07-30 at 11.28.41 AM.png" alt="Screen Shot 2022-07-30 at 11.28.41 AM" style="zoom:50%;" />
+
+
+
+config for kernel
+
+Launching a kernel with a different preference than the most recent preference setting might result in implicit device synchronization. 如果当前kernel的setting与前一个kernel的不一样，可能会导致implicit sync with device
+
+```cpp
+cudaError_t cudaFuncSetCacheConfig(const void* func, enum cudaFuncCacheca cheConfig);
+```
+
+
+
+
+
 ### Memory Bank
 
 > Reference
@@ -918,22 +759,116 @@ __shared__ float a[size_x][size_y];
 > 1. CUDA C++ Best Practice Guide chapter 9.2.3
 > 2. CUDA C++ Programming Guide chapter K.3
 > 3. Caltech CS179 Lecture 5
+> 4. Professional CUDA C Programming chapter 5
 
 
 
-#### 是什么
+#### Shared memory warp level transaction
 
-shared memory is divided into equally sized memory modules (banks) that can be accessed simultaneously. Therefore, any memory load or store of n addresses that spans n distinct memory banks can be serviced simultaneously, yielding an effective bandwidth that is n times as high as the bandwidth of a single bank。shared memory底层被切分为多个memory bank来使用。同时访问多个bank可以被同时serve，具有一个bank的n倍的bandwidth。
+Shared memory accesses are issued per warp. 对于shared memory的访问是以warp为单位进行访问的，而不是warp内每个thread分别访问shared memory。warp内的多个therad首先会合并threads之间的访问为一个或多个transaction，然后去访问shared memory。这样做的好处是（比起每个thread自己访问shared memory）增加数据的利用率，减少对shared memory的总access次数。
 
-shared memory被切分为32个bank (all cc)，大多数的cc中每个bank大小为32 bits( except cc 3.x )，连续的bank放连续的数据，每个bank的bandwidth是32 bits / clock cycle (except cc 3.x). 
+Ideally, each request to access shared memory by a warp is serviced in one transaction. In the worst case, each request to shared memory is executed sequentially in 32 unique transactions. 最好的情况一次warp对shared memory的访问只会引发一次transaction。最坏的情况一次warp对shared memory的访问会引发32次transaction。
 
-如果多个memory request对应到一个bank，则这些访问会被serialized。(Figure 21 middle image)
+If multiple threads access the same word in shared memory, one thread fetches the word, and sends it to the other threads via multicast/broadcast. 如果一个warp内的threads都concurrently访问同一个shared memory location，则只有一个thread访问这个location/只产生一次memory transaction，然后这个memory被broadcast到每一个threads。同样的broadcast在使用constant cache，warp level shuffle的时候都有。
 
-如果多个memory request对应到any sub-word of one aligned 32 bit word (尽管在一个bank内)，访问不会serialize。如果是read则会broadcast，如果是write则只要一个thread写，但是哪个thread写是undefined的 (Figure 22 right two image)
+If a shared memory load or store operation issued by a warp does not access more than one memory location per bank, the operation can be serviced by one memory transaction. 一个warp对shared memory的load/store在每个bank上只有一个location（并且在每个bank上请求的数据是小于bank bandwidth的），则只产生一个合并的memory transaction。最好的使用shared memory的办法就是确保请求的数据分布在每个bank中，每个bank充分的利用bank自己的bandwidth
+
+
+
+#### Memory bank & bank conflict
+
+* 特点
+
+1. shared memory is divided into equally sized memory modules (banks) that can be accessed simultaneously. Therefore, any memory load or store of n addresses that spans n distinct memory banks can be serviced simultaneously, yielding an effective bandwidth that is n times as high as the bandwidth of a single bank。shared memory底层被切分为多个memory bank来使用。同时访问多个bank可以被同时serve，具有一个bank的n倍的bandwidth。
+2. When multiple addresses in a shared memory request fall into the same memory bank, a bank conflict occurs, causing the request to be replayed. The hardware splits a request with a bank conflict into as many separate conflict-free transactions as necessary, decreasing the effective bandwidth by a factor equal to the number of separate memory transactions required. 对于shared memory的多个访问如果都落到一个bank中（并且不是same word，无法触发broadcast），则这些request会被replay。Hardware会split conflict request into serialized conflict free request。 (Figure 21 middle image)。花费的时间会是num replay * one bank free time
+3. all threads in a warp read the same address within a single bank. One memory transaction is executed, and the accessed word is broadcast to all requesting threads. 如果多个memory request对应到any sub-word of one aligned 32 bit word (尽管在一个bank内)，访问不会serialize。如果是read则会broadcast，如果是write则只要一个thread写，但是哪个thread写是undefined的 (Figure 22 right two image). 这种情况下，bandwidth的使用依旧很低，因为num banks * bank bandwidth这么多的数据只用于传送一个word的数据。
+
+
+
+Three typical situations occur when a request to shared memory is issued by a warp: 三种warp访问shared memory的类型
+
+1. parallle access：no bank conflict
+2. serial access : bank conflict cause serialized access to shared memory bank
+3. broadcast access: single address read in single bank and broadcast to all threads in warp
+
+
 
 <img src="Note.assets/Screen Shot 2022-06-27 at 10.42.50 PM.png" alt="Screen Shot 2022-06-27 at 10.42.50 PM" style="zoom:50%;" />
 
 <img src="Note.assets/Screen Shot 2022-06-27 at 10.43.04 PM.png" alt="Screen Shot 2022-06-27 at 10.43.04 PM" style="zoom:50%;" />
+
+
+
+
+
+#### Access Mode 32/64-bit
+
+shared memory bank width: defines which shared memory addresses are in which shared memory banks. 
+
+4 bytes (32-bits) for devices of compute capability except 3.x
+
+8 bytes (64-bits) for devices of compute capability 3.x
+
+
+
+* Fermi 2.x (and all cc except 3,x)
+
+For a Fermi (2.x) device, the bank width is 32-bits and there are 32 banks. Each bank has a bandwidth of 32 bits per two clock cycles. Successive 32-bit words map to successive banks. (also apply for none 3.x device, only differ in number of clock cycle per transaction)
+
+<img src="Note.assets/Screen Shot 2022-07-30 at 10.39.06 AM.png" alt="Screen Shot 2022-07-30 at 10.39.06 AM" style="zoom:50%;" />
+
+A bank conflict does not occur when two threads from the same warp access the same address. In that case, for read accesses, the word is broadcast to the requesting threads, and for write accesses, the word is written by only one of the threads — which thread performs the write is undefined. 当访问同一个bank内的32-bit word (4 bytes)的时候没有bank conflict。如果是read则broadcast。如果是write则有一个thread成功，具体是哪个是undefined的。
+
+Figure 5-5 上面是bytes address对应word indx。下面是word index对应bank index
+
+<img src="Note.assets/Screen Shot 2022-07-30 at 10.39.21 AM.png" alt="Screen Shot 2022-07-30 at 10.39.21 AM" style="zoom:50%;" />
+
+
+
+* Kepler 3.x
+
+For Kepler devices, shared memory has 32 banks with 64-bit mode and 32-bit mode.
+
+In 64-bit mode, successive 64-bit words map to successive banks. Each bank has a bandwidth of 64 bits per clock cycle.
+
+<img src="Note.assets/Screen Shot 2022-07-30 at 10.42.38 AM.png" alt="Screen Shot 2022-07-30 at 10.42.38 AM" style="zoom:50%;" />
+
+A shared memory request from a warp does not generate a bank conflict if two threads access any sub-word within the same 64-bit word because only a single 64-bit read is necessary to satisfy both requests. As a result, 64-bit mode always causes the same or fewer bank conflicts for the same access pattern on Kepler devices relative to Fermi. 当访问同一个bank内的64-bit word(8 bytes)的时候没有bank conflict。
+
+1. read access：64 bits word会被broadcast到全部的threads
+2. write access：warp内只有一个thread会发生write，具体是哪个thread是undefined的
+
+In 32-bit mode, successive 32-bit words map to successive banks. However, because Kepler has a band- width of 64 bits per clock cycle, accessing two 32-bit words in the same bank does not always imply
+a retry. It may be possible to read 64-bits in a single clock cycle and pass only the 32 bits requested to each thread. 数据到bank的映射是按照32-bit为单位的。但是bank width依旧是64 bit的，也就意味着一个clock cycle可以传送64 bit的数据，也就意味着在32-bit mode下，访问同一个bank的2个32-bit word不一定产生bank conflict，因为bank width是64，可以把2个word都传送出去。bank conflict的本质是bank width小，所以无法传送过多的数据
+
+1. read access：32 bit word会被broadcast
+2. write access：warp内只有一个thread会发生write，具体是哪个thread是undefined的
+
+Figure 5-6是32 bit mode情况下的数据分布
+
+<img src="Note.assets/Screen Shot 2022-07-30 at 10.47.06 AM.png" alt="Screen Shot 2022-07-30 at 10.47.06 AM" style="zoom:50%;" />
+
+A large bank size may yield higher bandwidth for shared memory access, but may result in more bank conflicts depending on the application’s shared memory access patterns. 大的bank会带来更大的bandwidth，但是会有更多的conflict
+
+
+
+* Configure Kepler
+
+Changing the shared memory configuration between kernel launches might require an implicit device synchronization point. 改变Kepler下shared memory bank可能会导致implicit sync with device
+
+```cpp
+// query access mode 
+cudaError_t cudaDeviceGetSharedMemConfig(cudaSharedMemConfig *pConfig);
+
+cudaSharedMemBankSizeFourByte
+cudaSharedMemBankSizeEightByte
+
+// setting access mode
+cudaError_t cudaDeviceSetSharedMemConfig(cudaSharedMemConfig config);
+cudaSharedMemBankSizeDefault 
+cudaSharedMemBankSizeFourByte 
+cudaSharedMemBankSizeEightByte
+```
 
 
 
@@ -945,27 +880,31 @@ stride 指的是warp内的连续的thread，访问内存的间隔。如果t0访�
 
 
 
-* 不同的stride，对应的conflict类型
+* 不同的stride，对应的conflict类型 (假设2.x 32-bit mode)
 
-stride of one 32 bit word : conflict free (Fig 21 above left)
+stride of one 32 bit word : conflict free (见上Fig 21 above left)
 
-stride of two 32 bit word : 16 x 2-way (2-way表示会被serialize为两个access) bank conflict (Fig 21 middle)
+stride of two 32 bit word : 16 x 2-way (2-way表示会被serialize为两个access) bank conflict (见上Fig 21 middle)
 
-stride of three 32 bit word : conflict free (Fig 21 right)
+stride of three 32 bit word : conflict free (见上Fig 21 right)
 
 ...
 
 stride of 32 32 bit word : 1 x 32-way (32-way表示会被serialize为32个access) bank conflict
 
+也就是奇数的stride是conflict free的，偶数的stride是有conflict的
+
 
 
 #### Avoid bank conflict
 
-* stride of 32 32 bits word
+* stride of 32 32 bits word (32-bit mode)
 
 stride of 32 32 bits word 产生 1 x 32-way bank conflict 经常发生在使用shared memory处理2D array of 32 x 32，每个thread负责一个row。这样每个thread对应的row开始都会是在同一个bank中。
 
 解决方法是pad 2d array to sizd 32 x 33, 这样每个thread负责的一个row的开始都不是在一个bank中 (stride of 33 33 bit word是conflict free的)
+
+对于padding 64-bit与32-bit mode的方法是不一样的。有些在32-bit上是conflict free的，在64-bit上就有conflict了
 
 
 
@@ -978,6 +917,20 @@ are both coarlesed global memory access & shared memory conflict free
 * 常见pattern
 
 In the “load from global, store into shared, do quadratic computation on shared data” pattern, you sometimes have to choose between noncoalesced loads or bank conflicts on stores. Generally bank conflicts on stores will be faster, but it’ s worth benchmarking. The important thing is that the shared memory loads in the “quadratic computation” part of the code are conflict-free (because there are more of these loads than either other operation).
+
+
+
+* performence compared with global memory
+
+> Reference
+>
+> 1. CUDA Developer Form About the different memories [link](https://forums.developer.nvidia.com/t/about-the-different-memories/1861/6)
+
+
+
+shared memory is fast even if there are bank conflicts. Even with 16-way bank conflicts, shared memory is dozens of times faster than gobal memory. shared memory就算是有bank conflict也比global memory要快很多
+
+many people get too worried about bank conflicts. Optimize for bank conflicts last, especially if they are only 2- or 4-way conflicts, which may take more instructions to optimize away than they cost anyway.  有些时候为了避免shared memory bank conflict从而做了很多优化，但是由于额外的增加intrinsic，导致perf反而变差
 
 
 
@@ -1030,6 +983,8 @@ CUDA 11.0 允许async copy from global memory to shared memory
 <img src="Note.assets/Screen Shot 2022-06-28 at 11.19.35 PM.png" alt="Screen Shot 2022-06-28 at 11.19.35 PM" style="zoom:50%;" />
 
 
+
+
 * 与Cache关系
 
 可以optionally 使用L1 cache. 
@@ -1050,7 +1005,7 @@ CUDA 11.0 允许async copy from global memory to shared memory
 
 
 
-##### Example
+#### Example
 
 ```cpp
 template <typename T>
@@ -1095,7 +1050,7 @@ __global__ void pipeline_kernel_async(T *global, uint64_t *clock, size_t copy_co
 
 
 
-##### API
+#### API
 
 * __pipeline_memcpy_async()
 
@@ -1109,24 +1064,87 @@ wait until all instruction in pipe object have been executed
 
 
 
-## Constant cache
+## Constant cache & Read-Only Cache
 
-#### 特点
+### Difference
 
-1. Read only
-2. higher throughput than L1 cache. Same 5 cycle latency as L1 cache.
-3. each time when a constant is access from cache, it can be broadcast to all threads in a warp. this makes constant memory almost as efficent as registers
+> Reference
+>
+> 1. Professional CUDA C Programming chapter 5
+> 1. CUDA Developer Form Do 7.x device have readonly constant cache [link](https://forums.developer.nvidia.com/t/do-7-x-devices-have-a-readonly-constant-cache/220844)
+> 1. CUDA Developer Form const __restrict__ read faster than __constant__ ? [link](https://forums.developer.nvidia.com/t/const-restrict-read-faster-than-constant/31982)
+
+
+
+对于不同compute capacity的硬件，constant cache，read-only texture cache, L1 cache的关系是不太一样的。
+
+
+
+GPU 一共有4中类型的cache
+
+1. L1 Cache
+2. L2 Cache
+3. read-only constant cache (through constant memory)
+4. read-only texture cache (thorugh texture memory / ldg load global memory)
+
+
+
+(For Kepler) The read-only cache is separate and distinct from the constant cache. Data loaded through the constant cache must be relatively small and must be accessed uniformly for good performance (all threads of a warp should access the same location at any given time), whereas data loaded through the read-only cache can be much larger and can be accessed in a non-uniform pattern. 
+
+Read-only cache 与 constant cache 是两个东西
+
+constant cache适用于small + all warp threads read same location (access uniform)
+
+read-only cache适用于much larger + non-uniform pattern / stream through array
+
+两种cache分别有自己的使用方法。
+
+
+
+使用constant cache对于uniform access(all warp threads read same location) 的performance更好，是因为constant memory对于broadcast access pattern的优化比起read-only cache更好。(不确定对于最新的GPU arch是否还有在perf上的区别)
+
+
+
+
+
+### Constant Memory & Constant Cache
+
+> Reference
+>
+> 1. Professional CUDA C Programming chapter 5
+> 1. CUDA C++ Best Practice Guide 9.2.6
+> 1. Caltech CS179 lecture 5
+> 1. UIUC ECE 408 Lecture 7
+
+
+
+Constant memory is a special-purpose memory used for data that is read-only and accessed uniformly by threads in a warp. Constant Memory用于在device上的uniform read. 物理上与global memory都在off chip device memory上
+
+64 kb constant memory for user, 64 kb for compiler. kernel arguments are passed through constnat memory 
+
+Constant memory is as fast as register
+
+higher throughput than L1 cache. Same 5 cycle latency as L1 cache.
+
+Constant memory variables can be visible across multiple source files when using the CUDA separate compilation capability. constant memory不仅仅可以被相同file的全部grid可见，还是visibale across soruce file的
+
+常用于储存formula的coefficent。warp threads会一起访问某一个coefficent，这样是最适合constant memory的。之所以不用register储存coefficent是因为有太大的register pressure，导致num block/SM下降
+
+
+
+#### Broadcast
+
+The constant cache has a single port that broadcasts data to each thread in a warp. 
+
+each time when a constant is access from cache, it can be broadcast to all threads in a warp. this makes constant memory almost as efficent as registers. 当warp thread访问相同的constant memory location的时候，会进行broadcast
 
 
 
 #### Serialization
 
-> Reference
->
-> 1. CUDA C++ Best Practice Guide 9.2.6
+Accesses to different addresses by threads within a warp are serialized (by split one large request into seprate request). Thus, the cost of a constant memory read scales linearly with the number of unique addresses read by threads within a warp. warp threads访问不同的constant memory location，会导致访问被serialize
 
-warp内对于constant cache不同地址的访问是serialized的。Accesses
-to different addresses by threads within a warp are serialized, thus the cost scales linearly with the number of unique addresses read by all threads within a warp.
+warp内对于constant cache不同地址的访问是serialized的。Accesses to different addresses by threads within a warp are serialized, thus the cost scales linearly with the number of unique addresses read by all threads within a warp.
 
 如果t0访问constant cache addr 0， t1访问constant cache addr 1，这两个对constant cache的访问会serialized。
 
@@ -1134,77 +1152,118 @@ to different addresses by threads within a warp are serialized, thus the cost sc
 
 
 
-#### Static indexing / broadcast
+#### API
+
+```cpp
+// copy host to constant memory on host
+cudaError_t cudaMemcpyToSymbol(const void *symbol, const void * src, size_t count, size_t offset, cudaMemcpyKind kind)
+```
+
+
+
+API with example
+
+```cpp
+__constant__ float coef[RADIUS + 1];
+
+
+__global__ void stencil_1d(float *in, float *out) { 
+  // shared memory
+  __shared__ float smem[BDIM + 2*RADIUS];
+  // index to global memory
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  // index to shared memory for stencil calculatioin 
+  int sidx = threadIdx.x + RADIUS;
+  // Read data from global memory into shared memory 
+  smem[sidx] = in[idx];
+  // read halo part to shared memory 
+  if (threadIdx.x < RADIUS) {
+    smem[sidx - RADIUS] = in[idx - RADIUS];
+    smem[sidx + BDIM] = in[idx + BDIM]; 
+  }
+  // Synchronize (ensure all the data is available) 
+  __syncthreads();
+  // Apply the stencil
+  float tmp = 0.0f;
+  
+  #pragma unroll
+  for (int i = 1; i <= RADIUS; i++) {
+  	tmp += coef[i] * (smem[sidx+i] - smem[sidx-i]); 
+  }
+  // Store the result
+  out[idx] = tmp; 
+}
+```
+
+
+
+### Read-Only Texture Cache
 
 > Reference
 >
-> 1. Caltech CS179 lecture 5
-
-If all threads of a warp access the same location, then constant memory can be as fast as a register access. 这是因为 thread within warp access same memory address via constant cache. data will be broadcast to all threads in warp. 
-
-这里的broadcast行为与shared memory中broadcast很相似
-
-
-
-### How to use
-
-#### intrinsic
-
-> Reference
->
-> 1. CUDA C++ Programming Guide chapter B.10
+> 1. Professional CUDA C Programming chapter 5
+> 2. CUDA C++ Programming Guide chapter B.10
+> 3. Memory Statistics - Caches [link](https://docs.nvidia.com/gameworks/content/developertools/desktop/analysis/report/cudaexperiments/kernellevel/memorystatisticscaches.htm)
+> 4. Memory Statistics - Global [link](https://docs.nvidia.com/gameworks/content/developertools/desktop/analysis/report/cudaexperiments/kernellevel/memorystatisticsglobal.htm)
+> 5. Blog CUDA-F-4-3-内存访问模式 [link](https://face2ai.com/CUDA-F-4-3-内存访问模式/)
+> 6. Stackoverflow What is the difference between __ldg() intrinsic and a normal execution? [link](https://stackoverflow.com/questions/26603188/what-is-the-difference-between-ldg-intrinsic-and-a-normal-execution)
 
 
 
-当使用了`const __resirtct__` keyword以后，compiler会automatic load throuh read-only cache. 
+GK110 adds the ability for read-only data in global memory to be loaded through the same cache used by the texture pipeline via a standard pointer without the need to bind a texture beforehand and without the sizing limitations of standard textures. Since this is a separate cache with a separate memory pipe and with relaxed memory coalescing rules, use of this feature can benefit the performance of bandwidth-limited kernels. Kepler开始GPU支持对global memory使用per SM read-only cache。底层使用GPU texture pipeline as read-only cache for data stored in global memory
+
+Global memory accesses are routed either through L1 and L2, or only L2, depending on the architecture and the type of instructions used. Global read-only memory accesses are routed through the texture and L2 caches. Texture memory is read-only device memory, and is routed through the texture cache and the L2 cache.
+
+通过read-only texture cache (也会通过L2 Cache) 读取global memory比起normal global memory read (会通过L1+L2 cache)有更大的bandwidth
+
+The granularity of loads through the read-only cache is 32 bytes. read only cache是32 bytes granularity的
+
+相比起L1，对于scatter read使用read-only cache更有效。
 
 
+
+#### API
+
+下面的两种使用方法都是indicate to the compiler that data is read-only for the duration of a kernel. 也就是代表一个部分的内存不会在一个kernel内一会是read-only，一会是write
+
+
+
+* intrinsic
 
 对于computation capacity > 3.5 的设备，可以使用intrinsic来强制得到对应data type T的数据。
 
-使用`__ldg`读取的数据会被cache在read only cache中
-
 ```cpp
-T __ldg(const T* address);
+__global__ void kernel(float* output, float* input) 
+{ 
+  ...
+	output[idx] += __ldg(&input[idx]);
+	... 
+}
 ```
 
 
 
-#### constant memory
+* compiler hint
 
-> Reference
->
-> 1. UIUC 408 Lecture 7
+对于compiler的hint，让compiler生成read-only cache读取
 
-
-
-* 特点
-
-1. 物理上与global memory都在off chip device memory上
-2. 目的是为了使用constant cache，从而减小对global memory的访问
-3. visible to all grid / 全局可见
-4. 64 kb for user, 64 kb for compiler
-   1. kernel arguments are passed through constnat memory 
-
-5. 用于image filter的weight，math formula的参数
-
-
+对于复杂的kernel，有些时候compiler hint可能不管用，还是推荐ldg读取
 
 ```cpp
-// constant memory declared outside all function
-__constant__ float Mc[MASK_WIDTH][MASK_WIDTH];
-
-// copy from device to constant memory
-cudaMemcpyToSymbol(Mc, Mask,, MASK_WIDTH*MASK_WIDTH*sizeof(float));
+void kernel(float* output, const float* __restrict__ input) 
+{ 
+  ...
+	output[idx] += input[idx]; 
+}
 ```
-
-
-
-A request is then split into as many separate requests as there are different memory addresses in the initial request, decreasing throughput by a factor equal to the number of separate requests.
 
 
 
 ## L1 & L2 Cache
+
+Some part of cache related topic are included in global memory
+
+
 
 #### Cache VS Shared Memory
 
@@ -1218,45 +1277,6 @@ A request is then split into as many separate requests as there are different me
 
 1. programmer control shared memory 
 2. micro-arch determine content of cache
-
-
-
-#### Disable L1 Cache
-
-> Reference
->
-> 1. NVIDIA Tech Blog Cache behavior when loading global data to shared memory in Fermi [link](https://forums.developer.nvidia.com/t/cache-behavior-when-loading-global-data-to-shared-memory-in-fermi/29259)
-> 1. NVIDIA Tech Blog Coalesed Transaction Size [link](https://forums.developer.nvidia.com/t/coalesced-transaction-size/24602)
-
-
-
-load from global memory to register will be cache at L1 at default. 
-
-If you use the inline PTX call “ld.global.cg”, the read will be cached in L2 but not L1. “ld.global.cs” will not cache the read in L1 or L2. Alternatively, you can use a simple NVCC flag to make either of these types of reads the default by using “-Xptxas -dlcm=cg” or “-Xptxas -dlcm=cs”, though of course that then applies to ALL reads in your program.
-
-
-
-#### Read only cache
-
-> Reference
->
-> 1. Blog CUDA-F-4-3-内存访问模式 [link](https://face2ai.com/CUDA-F-4-3-内存访问模式/)
-> 2. Stackoverflow What is the difference between __ldg() intrinsic and a normal execution? [link](https://stackoverflow.com/questions/26603188/what-is-the-difference-between-ldg-intrinsic-and-a-normal-execution)
-
-从computation capacity 3.5+， 可以利用read only cache来读取global memory。
-
-read only cache的burst size是32 bytes，而不是L1 cache的128 bytes。
-
-更适合于random access data
-
-```cpp
-__global__ void copyKernel(float * in,float* out)
-{
-    int idx=blockDim*blockIdx.x+threadIdx.x;
-    out[idx]=__ldg(&in[idx]);
-
-}
-```
 
 
 
@@ -1365,7 +1385,15 @@ local memory与global memory都是放在off-chip device memory上
 
 * 什么样的automatic variable会放在local memory上
 
-array如果fix size + small in size有可能会被compiler放在register上。
+> Reference
+>
+> 1. CUDA Developer Form const restrict read faster than constant [link](https://forums.developer.nvidia.com/t/const-restrict-read-faster-than-constant/31982/9)
+
+
+
+I would claim perspective is important: The default storage for a local array is local memory, where “local” means “thread-local”.  array默认都是放在thread private的local memory上
+
+The compiler may, as an optimization, promote the local array to register storage. array如果fix size + small in size有可能会被compiler放在register上。本质上是被compiler optimize从local memory放到了register上
 
 否则会被放在local memory上，因为compiler不知道这个array会有多长，无法把array拆分后放到regsiter中。
 
@@ -1416,6 +1444,42 @@ local memory在device上的layout：t0 idx0, t1 idx0, t2 idx0, ... t31 idx0, t0 
 compute capability 3.x local memory accesses are always cached in L1 and L2 in the same way as global memory accesses (see Compute Capability 3.x).
 
 compute capability 5.x and 6.x, local memory accesses are always cached in L2 in the same way as global memory accesses (see Compute Capability 5.x and Compute Capability 6.x).
+
+
+
+## Register
+
+> Reference
+>
+> 1. CUDA Form Saving registers with smaller data types? [link](https://forums.developer.nvidia.com/t/saving-registers-with-smaller-data-types/7376)
+
+
+
+Registers 是 32 bit / 4 bytes 大小的 (same size as int / single precision float)。如果数据类型是double的话，则使用2个register。
+
+可以通过pack small data into a register (e.g. 2 short) and use bitmask + shift 来读取。从而减少register usage per thread
+
+
+
+* Bank conflict 
+
+> Reference
+>
+> 1. CUDA C++ Best practice 9.2.7
+
+Register 也会有bank conflict，只不过这是完全由compiler处理的，programmer对于解决register bank conflict没有任何控制。
+
+并不需要特意把数据pack成vector type从而来避免bank conflict
+
+
+
+* 控制per thread max register
+
+可以通过compiler option来控制max register pre thread
+
+```shell
+-maxrregcount=N
+```
 
 
 
@@ -1674,18 +1738,259 @@ atoimc次数与bandwidth是log的反向相关。下图中的横轴可以理解�
 
 
 
-## Synchronization
+## Zero-Copy Memory
 
-A kernel call is asynchronous with respect to the host thread. After a kernel is invoked, control returns to the host side immediately. 启动device kernel是async的。
+> Reference
+>
+> 1. Professional CUDA C Programming chapter 4
 
 
 
-#### Implicit Sync
+> Note: 并不是很常用
 
-* cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind);
 
-implicit synchronization at the host side is performed and the host application must wait for the data copy to complete.
 
+GPU threads can directly access zero-copy memory (on host).
+
+Zero-copy memory is pinned (non-pageable) memory that is mapped into the device address space. 本质上是pinned host memory映射到device address space
+
+When using zero-copy memory to share data between the host and device, you must synchronize memory accesses across the host and device. Modifying data in zero-copy memory from both the host and device at the same time will result in undefined behavior. 如果在host/device修改了内存，需要synchronize来保证consistency。
+
+
+
+优点
+
+1. Leveraging host memory when there is insufficient device memory
+2. Avoiding explicit data transfer between the host and device
+
+
+
+缺点
+
+1. For discrete systems with devices connected to the host via PCIe bus, zero-copy memory is advantageous only in special cases. 对于使用PCIe链接的GPU与CPU，zero-copy 速度比global memory/device memory要慢。就算是加上了memory transfer time也还是慢。
+2. In integrated architectures, CPUs and GPUs are fused onto a single die and physi- cally share main memory. In this architecture, zero-copy memory is more likely to benefit both performance and programmability because no copies over the PCIe bus are necessary. 当GPU CPU使用同一个memory，使用zero-copy对于performence和programability都有帮助
+3. 很多时候用zero copy memory只是因为
+   1. device memory不够用
+   2. 简化程序
+
+
+
+#### API
+
+```cpp
+cudaError_t cudaHostAlloc(void **pHost, size_t count, unsigned int flags);
+```
+
+cudaHostAllocDefault makes the behavior of cudaHostAlloc identical to cudaMallocHost
+
+cudaHostAllocPortable returns pinned memory that can be used by all CUDA contexts, not just the one that performed the allocation. 
+
+cudaHostAllocWriteCombined returns write-combined memory, which can be transferred across the PCI Express bus more quickly on some system configurations but cannot be read efficiently by most hosts.
+
+cudaHostAllocMapped, which returns host memory that is mapped into the device address space.
+
+
+
+## Unified Virtual Address
+
+> Reference
+>
+> 1. Professional CUDA C Programming Chapter 4
+
+
+
+> Note: 并不是很常用
+
+
+
+Devices with compute capability 2.0 and later support a special addressing mode called Unified Virtual Addressing (UVA). UVA, introduced in CUDA 4.0, is supported on 64-bit Linux systems. With UVA, host memory and device memory share a single virtual address space. UVa让CPU GPU的virtual memory是共享的
+
+<img src="Note.assets/Screen Shot 2022-07-30 at 10.05.28 PM.png" alt="Screen Shot 2022-07-30 at 10.05.28 PM" style="zoom:50%;" />
+
+
+
+With UVA, there is no need to acquire the device pointer or manage two pointers to what is physically the same data. 
+
+```cpp
+// allocate zero-copy memory at the host side 
+cudaHostAlloc((void **)&h_A, nBytes, cudaHostAllocMapped); 
+cudaHostAlloc((void **)&h_B, nBytes, cudaHostAllocMapped);
+// initialize data at the host side 
+initialData(h_A, nElem); 
+initialData(h_B, nElem);
+// invoke the kernel with zero-copy memory 
+sumArraysZeroCopy<<<grid, block>>>(h_A, h_B, d_C, nElem);
+```
+
+
+
+## Unified Memory
+
+> Reference
+>
+> 1. Professional CUDA C Programming Chapter 4
+
+
+
+> Note: 并不是很常用
+
+
+
+从CUDA6中引入
+
+Unified Memory creates a pool of managed memory, where each allocation from this memory pool is accessible on both the CPU and GPU with the same memory address (that is, pointer). The underlying system automatically migrates data in the unified memory space between the host and device. 一个memory pool可以同时在device host上使用，unified memory底层对memory transaction进行维护。
+
+Unified Memory depends on Unified Virtual Addressing (UVA) support, but they are entirely differ- ent technologies. UVA provides a single virtual memory address space for all processors in the system. However, UVA does not automatically migrate data from one physical location to another; that is a capability unique to Unified Memory. UVA是相同virtual memory space，但是依旧需要对memory进行host to device的拷贝。Unified Memory是对用户来说只有一个memory，由unified memory来负责底层数据的拷贝。
+
+
+
+#### API
+
+* static
+
+```cpp
+__device__ __managed__ int y;
+```
+
+
+
+* dynamic
+
+```cpp
+cudaError_t cudaMallocManaged(void **devPtr, size_t size, unsigned int flags=0);
+```
+
+
+
+## Weakly-Ordered Memory Model
+
+> Reference
+>
+> 1. CUDA Toolkits document [link](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#memory-fence-functions)
+> 2. stackoverflow [link](https://stackoverflow.com/questions/5232689/cuda-threadfence)
+> 3. Professional CUDA C Programming guide chapter 5
+
+
+
+#### 是什么
+
+Modern memory architectures have a relaxed memory model. This means that the memory accesses are not necessarily executed in the order in which they appear in the program. CUDA adopts a weakly-ordered memory model to enable more aggressive compiler optimizations. The order in which a GPU thread writes data to different memories, such as shared memory, global memory, page-locked host memory, or the memory of a peer device, is not necessarily the same order of those accesses in the source code. The order in which a thread’s writes become visible to other threads may not match the actual order in which those writes were performed. CUDA使用weakly-ordered memory model。程序对memory的访问与实际上硬件对memory的访问是不一样的。一个thread写入shared memory, global memory, paged lock memory的顺序与另一个thread观察到的顺序是不一样的。如果两个thread一个read，一个write，没有sync的话，则行为是undefined的
+
+可以通过使用memory fence或者barriers来保证不同thread读取到的数据是expected的
+
+
+
+#### Explicit Barriers
+
+__syncthreads ensures that all global and shared memory accesses made by these threads prior to the barrier point are visible to all threads in the same block. 应用范围是all caller thread within threads block的。all threads within threads block对内存的操作barrier以后对all threads within threads block可见
+
+```cpp
+void __syncthreads();
+```
+
+
+
+deadlock:
+
+syncthread不能与branch一起使用。
+
+all threads in threads block must call the same syncthreads function call. 可以理解为每个syncthreads function call有自己的unique id。当某个unique id syncthreads 运行以后，需要all threads in threads block都运行这个特定的synchthread方程才可以继续
+
+```cpp
+if (threadID % 2 == 0) {
+  __syncthreads();
+} else { 
+  __syncthreads();
+}
+```
+
+
+
+#### Memory Fence
+
+Memory fence functions ensure that any memory write before the fence is visible to other threads after the fence （取决于不同的API，应用范文也是不一样的）. 通过使用memory fence，保证 (1) all write before fence对于程序(不同的scope)来说发生在all write after fence之前. (2) all read before fence对于程序(不同的scope)来说发生在all read after fence之前。
+
+
+
+* `void __threadfence_block();`
+
+ensures that all writes to shared memory and global memory made by a calling thread before the fence are visible to other threads in the same block after the fence. 应用范围是单一calling thread对global and shared memory的操作是visible to all other threads in same threads block。
+
+这个API不用被all threads in threads block调用。用于只想visible某个threads对内存的操作。
+
+
+
+使用within block fence 可能会存在的问题
+
+<img src="Note.assets/Screen Shot 2022-07-30 at 11.54.08 AM.png" alt="Screen Shot 2022-07-30 at 11.54.08 AM" style="zoom:50%;" />
+
+
+
+* `void __threadfence();`
+
+stalls the calling thread until all of its writes to global memory are visible to all threads in the same grid. 应用范围是单一calling threads对于global memory的操作是visible to all other threads in grid。
+
+之所以没有shared memory，是因为visibel to all threads in grid，是跨越block的
+
+
+
+* 例子 1
+
+下面这个例子中，不可能得到A=1,B=20。因为X=10一定发生在Y=20之前，如果observe了Y=20的话，则X=10一定运行完了
+
+```cpp
+__device__ int X = 1, Y = 2;
+
+__device__ void writeXY()
+{
+    X = 10;
+    __threadfence();
+    Y = 20;
+}
+
+__device__ void readXY()
+{
+    int B = Y;
+    __threadfence();
+    int A = X;
+}
+```
+
+
+
+* 例子 2
+
+Imagine, that one block produces some data, and then uses atomic operation to mark a flag that the data is there. But it is possible that the other block, after seeing the flag, still reads incorrect or incomplete data.
+
+一个block写入global memory数据以及用atomic写入flag，另一个block通过flag判断是否可以读取global memory的数据。
+
+ If no fence is placed between storing the partial sum and incrementing the counter, the counter might increment before the partial sum is stored 
+
+如果没有memory fence的话，可能flag会首先被atomic设置了，然后才设置global memory的数据。这样另一个block在读取到flag以后就开始读取global memmory的值可能就是不对的。
+
+通过使用memory fence，确保在fence后面读取memory的数据确实是fence之前写入的数据
+
+
+
+* `void __threadfence_system();`
+
+stalls the calling thread to ensure all its writes to global memory, page- locked host memory, and the memory of other devices are visible to all threads in all devices and host threads. 应用范围是单一calling thread对于global, page lock host, memory of other device的操作是visible to all threads in all device and host threads
+
+
+
+#### Volatile
+
+> Reference
+>
+> 1. CUDA Toolkits Document I.4.3.3 [link](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#volatile-qualifier)
+
+
+
+* 是什么
+
+compiler可以对global memory/shared memory的read write进行优化，例如cache在L1 cache或者register上，只要符合memory fence的要求就可以进行优化。
+
+Declaring a variable in global or shared memory using the volatile qualifier prevents compiler optimization which might temporally cache data in registers or local memory. With the volatile qualifier, the compiler assumes that the variable’s value can be changed or used at any time by any other thread.  声明volatile以后，compiler假设某个thread对内存的操作会any time被其余的thread使用，所以不适用cache进行优化，全部的写入会写入到gloabl memory/shared memory上。这样另一个thread可以读取对应的内存并且得到正确的数值。
 
 
 
@@ -1718,26 +2023,6 @@ Direct Memory Access：充分利用bandwidth和IO bus。DMA使用physical addres
 
 
 ## Others
-
-#### Volatile
-
-> Reference
->
-> 1. CUDA Toolkits Document I.4.3.3 [link](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#volatile-qualifier)
-
-
-
-* 是什么
-
-compiler可以对global memory/shared memory的read write进行优化，例如cache在L1 cache或者register上，只要符合memory fence的要求就可以进行优化。
-
-声明volatile以后，compiler会不optimize，全部的写入会写入到gloabl memory/shared memory上。这样另一个thread可以读取对应的内存并且得到正确的数值。
-
-
-
-* 例子
-
-==TODO: ADD 例子==
 
 
 
@@ -1804,123 +2089,4 @@ void foo(const float* __restrict__ a,
     .
 }
 ```
-
-
-
-
-
-### Register
-
-> Reference
->
-> 1. CUDA Form Saving registers with smaller data types? [link](https://forums.developer.nvidia.com/t/saving-registers-with-smaller-data-types/7376)
-
-
-
-Registers 是 32 bit / 4 bytes 大小的 (same size as int / single precision float)。如果数据类型是double的话，则使用2个register。
-
-可以通过pack small data into a register (e.g. 2 short) and use bitmask + shift 来读取。从而减少register usage per thread
-
-
-
-* Bank conflict 
-
-> Reference
->
-> 1. CUDA C++ Best practice 9.2.7
-
-Register 也会有bank conflict，只不过这是完全由compiler处理的，programmer对于解决register bank conflict没有任何控制。
-
-并不需要特意把数据pack成vector type从而来避免bank conflict
-
-
-
-* 控制per thread max register
-
-可以通过compiler option来控制max register pre thread
-
-```shell
--maxrregcount=N
-```
-
-
-
-### Unified memory
-
-在没有unified memory的情况下，在CPU上deref GPU ptr会导致runtime crash。
-
-从CUDA 6开始，使用unified address space，一个ptr可以同时在cpu gpu上使用。 
-
-
-
-
-
-### Memory Fence & memory consistency
-
-> Reference
->
-> 1. CUDA Toolkits document [link](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#memory-fence-functions)
-> 2. stackoverflow [link](https://stackoverflow.com/questions/5232689/cuda-threadfence)
-
-
-
-* 是什么
-
-CUDA使用weakly-ordered memory model。一个thread写入shared memory, global memory, paged lock memory的顺序与另一个thread观察到的顺序是不一样的。如果两个thread一个read，一个write，没有sync的话，则行为是undefined的
-
-通过使用memory fence，保证 (1) all write before fence对于程序(不同的scope)来说发生在all write after fence之前. (2) all read before fence对于程序(不同的scope)来说发生在all read after fence之前
-
-
-
-* 三个方程
-
-```cpp
-// fence for all thread within one block
-void __threadfence_block();
-
-// fence for all thread within one GPU device
-void __threadfence();
-
-// fence for all thread across all GPU device
-void __threadfence_system();
-
-```
-
-
-
-* 例子 1
-
-下面这个例子中，不可能得到A=1,B=20。因为X=10一定发生在Y=20之前，如果observe了Y=20的话，则X=10一定运行完了
-
-```cpp
-__device__ int X = 1, Y = 2;
-
-__device__ void writeXY()
-{
-    X = 10;
-    __threadfence();
-    Y = 20;
-}
-
-__device__ void readXY()
-{
-    int B = Y;
-    __threadfence();
-    int A = X;
-}
-```
-
-
-
-* 例子 2
-
-Imagine, that one block produces some data, and then uses atomic operation to mark a flag that the data is there. But it is possible that the other block, after seeing the flag, still reads incorrect or incomplete data.
-
-一个block写入global memory数据以及用atomic写入flag，另一个block通过flag判断是否可以读取global memory的数据。
-
- If no fence is placed between storing the partial sum and incrementing the counter, the counter might increment before the partial sum is stored 
-
-如果没有memory fence的话，可能flag会首先被atomic设置了，然后才设置global memory的数据。这样另一个block在读取到flag以后就开始读取global memmory的值可能就是不对的。
-
-通过使用memory fence，确保在fence后面读取memory的数据确实是fence之前写入的数据
 

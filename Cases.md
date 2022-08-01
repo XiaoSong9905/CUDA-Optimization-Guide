@@ -1,7 +1,5 @@
 # Cases
 
-
-
 ### Direct Coulombs Summation DCS
 
 > Reference
@@ -815,6 +813,38 @@ __global__ void sharedABMultiply(float *a, float* b, float *c,int N)
 * bank 分析
 
 注意，尽管这里shared memory B是 `[32][32]` ，但是对于shared memory的访问是stride1的，每个warp负责one row （而不是每个thread in one warp负责one row)，所以不存在bank conflict
+
+
+
+* memory coarlesed 分析
+
+下面的例子中，每个thread沿着黑色的箭头访问4个元素。对于N的访问中每个thread访问一个column。对于M的访问中每个thread访问一个row。数据是row major order的
+
+
+
+对于N的访问：
+
+是coarlesed的
+
+在step1中4个thread访问的内存（N00,N01,N02,N03，黄色的部分) 在virtual memory中是连续的（在物理内存上会被分配到多个bank，多个channel中）
+
+在step2中，访问新的连续的内存。
+
+<img src="Note.assets/Screen Shot 2022-05-31 at 12.09.35 AM.png" alt="Screen Shot 2022-05-31 at 12.09.35 AM" style="zoom:50%;" />
+
+
+
+对于M的访问：
+
+不是coalesced的
+
+每个thread读取的数据都会导致一次memory burst。
+
+Step1的4个value(M00,M10,M20,M30)需要4个burst(每个burst对应一个颜色)。由于burst buffer只有一个，在step 1访问结束后只有最后访问的burst依旧留在burst buffer中。
+
+step2的4个value访问(M01,M11,M21,M31)需要重新传送4个burst。
+
+<img src="Note.assets/Screen Shot 2022-05-31 at 12.10.24 AM.png" alt="Screen Shot 2022-05-31 at 12.10.24 AM" style="zoom:50%;" />
 
 
 
@@ -1790,7 +1820,9 @@ __global__ void histogram_privatized_kernel(unsigned char* input, unsigned int* 
 >
 > 1. UIUC 408 Lecture 17
 > 2. Optimizing parallel reduction in cuda by Mark Harris [link](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf)
-> 4. Faster Parallel Reductions on Kepler NVIDIA Blog [link](https://developer.nvidia.com/blog/faster-parallel-reductions-kepler/)
+> 3. Faster Parallel Reductions on Kepler NVIDIA Blog [link](https://developer.nvidia.com/blog/faster-parallel-reductions-kepler/)
+> 4. Professional CUDA C Programming Guide chapter 3
+> 5. Stackoverflow CUDA algorithm cascading [link](https://stackoverflow.com/questions/23232782/cuda-algorithm-cascading)
 
 
 
@@ -1818,7 +1850,20 @@ parallel algorithm 是work efficent的
 
 
 
-#### Simple reduction algorithm
+* 使用的方法是pairwise implementation，有两种方法
+
+1. Neighbored pair: Elements are paired with their immediate neighbor.
+   1. Figure 3.20
+
+2. Interleaved pair: Paired elements are separated by a given stride.
+   1. Figure 3.19
+
+
+<img src="Note.assets/Screen Shot 2022-07-31 at 9.58.51 PM.png" alt="Screen Shot 2022-07-31 at 9.58.51 PM" style="zoom:50%;" />
+
+
+
+#### Divergence in Parallel Reduction
 
 * 特点
 
@@ -1827,6 +1872,8 @@ parallel algorithm 是work efficent的
 使用tree based方法合并
 
 privitization：每个block内有一个output的拷贝，最后一起放到global上
+
+stride变大with iteration
 
 
 
@@ -1842,7 +1889,11 @@ privitization：每个block内有一个output的拷贝，最后一起放到globa
 
 
 
-#### Reduce branch divergence
+<img src="Note.assets/Screen Shot 2022-07-31 at 10.00.12 PM.png" alt="Screen Shot 2022-07-31 at 10.00.12 PM" style="zoom:50%;" />
+
+
+
+#### Reduced Divergence
 
 * 特点
 
@@ -1864,11 +1915,15 @@ privitization：每个block内有一个output的拷贝，最后一起放到globa
 
 
 
-#### Reduce memory bank conflict
+#### Reduce bank conflict
 
 * 特点
 
 使用连续的shared memory内存，从而避免bank conflict
+
+上面的方法中，对shared memory的访问的stride是power of 2，会产生bank conflict
+
+stride 变小 with iteration
 
 
 
@@ -1878,7 +1933,25 @@ privitization：每个block内有一个output的拷贝，最后一起放到globa
 
 
 
-#### On-the fly computation
+#### On-the fly computation / Cyclic Partitioning / Algorithm Cascading
+
+* 是什么
+
+结合sequential与parallel reduction。(sequential)每个thread首先从global memory读取多个值，sum up in register, 然后放到shared memory。(parallel) threads within block 从shared memory读取数据，parallel reduction。
+
+与上面的on-the-fly 计算的概念是一样的
+
+
+
+* 为什么
+
+保证了每个thread都有一些work来做(sequential 的部分每个threa都进行相加，相比起完全parallel的情况下只有部分thread相加)，减少shared  memory的使用
+
+
+
+<img src="Note.assets/Screen Shot 2022-06-09 at 4.59.10 PM.png" alt="Screen Shot 2022-06-09 at 4.59.10 PM" style="zoom:50%;" />
+
+
 
 * 特点
 
@@ -1888,17 +1961,39 @@ privitization：每个block内有一个output的拷贝，最后一起放到globa
 
 相比起储存全部的数据到shared memory里，这个kernel可以使用更少的threads block来处理相同的数据/同样大小的thread block处理更多的数据。当threads block大小减小的时候，就减少了diminishing parallelisim的问题。
 
+more independent memory load/store operations in a single thread yield better performance as memory latency can be better hidden. 每个thread load负责的工作越多，latency更容易被hide
+
+
+
+下面的slides来自ECE 408, 每个thread负责首先加两个block数据，然后再进行reduction。上面的code是用while loop控制每个thread加多少个数据，
+
 <img src="Note.assets/Screen Shot 2022-06-09 at 2.46.33 PM.png" alt="Screen Shot 2022-06-09 at 2.46.33 PM" style="zoom:50%;" />
 
 
 
-#### Reduce instruction overhead
+<img src="Note.assets/Screen Shot 2022-07-31 at 10.14.27 PM.png" alt="Screen Shot 2022-07-31 at 10.14.27 PM" style="zoom:50%;" />
+
+
+
+* performence
+
+unroll 2代表着每个thread负责加两个block的数据，就像是Figure 3.25（上）
+
+unroll的数量越多，每个thread可以进行的工作越多，more independent load/store越多，更容易hide latency
+
+<img src="Note.assets/Screen Shot 2022-07-31 at 10.17.17 PM.png" alt="Screen Shot 2022-07-31 at 10.17.17 PM" style="zoom:50%;" />
+
+
+
+#### Complete Unroll
 
 * 特点
 
+If you know the number of iterations in a loop at compile-time, you can completely unroll it.
+
 程序是memory bound的，之所以没有达到memory bandwidth是因为有其余的instruction overhead（也有其余的原因，像是kernel launch overhead等），希望减少其余的instruction 大小，减小instruction pipeline pressure。
 
-因为CUDA有对于threads per block的限制，所以可以completely unroll避免for loop
+因为CUDA有对于threads per block的限制，所以可以completely unroll避免for loop. 在使用template以后因为减少for loop使用，生成的代码只有实际reduce的instruction，没有for loop的instruction
 
 使用template实现。因为template会给出blocksize的大小，红色的if branch会在compile time决定。
 
@@ -1906,7 +2001,7 @@ privitization：每个block内有一个output的拷贝，最后一起放到globa
 
 
 
-#### Avoid sync in last 5 iteration
+#### Warp Unroll
 
 > Reference
 >
@@ -1914,7 +2009,9 @@ privitization：每个block内有一个output的拷贝，最后一起放到globa
 
 
 
-对于最后5个iteration(within warp0)不需要sync，因为warp内的thread是concurrent executed的，所以内部一定是sync的。
+对于最后5个iteration(within warp0)不需要sync，因为warp内的thread是concurrent executed的，所以内部一定是sync的。(对于prev arch，modern arch并不保证lock step)
+
+warp unrolling avoids executing loop control and thread synchronization logic. 通过unroll来减少loop control instruction的使用。减少threadsync的影响
 
 
 
@@ -1940,21 +2037,24 @@ volatile should be used when the data can be changed outside the current thread 
 
 
 
-#### Algorithm Cascading
+#### Performence
 
-> Reference
->
-> 1. Stackoverflow CUDA algorithm cascading [link](https://stackoverflow.com/questions/23232782/cuda-algorithm-cascading)
+下面的结论来自Professional CUDA C Programming chapter 3， 上面的代码与下面的结论使用的代码有一些小的不同，但是整体来说是一样的。
 
-是什么：结合sequential与parallel reduction。(sequential)每个thread首先从global memory读取多个值，sum up in register, 然后放到shared memory。(parallel) threads within block 从shared memory读取数据，parallel reduction。
+下面的performence table主要是为了大概了解不同的优化方法，可以带来多大的效果改善
+
+| our name                         | name in table               |
+| -------------------------------- | --------------------------- |
+| divergence in parallel reduction | neighbourhood (divergence)  |
+| reduce divergence                | neighbored (no divergence)  |
+| reduce bank conflict             | interleaved                 |
+| Algorithm Cascading              | Unroll 8 blocks             |
+| warp unroll                      | last warp                   |
+| complete unroll                  | loop + template last kernel |
 
 
 
-为什么：保证了每个thread都有一些work来做(sequential 的部分每个threa都进行相加，相比起完全parallel的情况下只有部分thread相加)，减少shared  memory的使用
-
-
-
-<img src="Note.assets/Screen Shot 2022-06-09 at 4.59.10 PM.png" alt="Screen Shot 2022-06-09 at 4.59.10 PM" style="zoom:50%;" />
+<img src="Note.assets/Screen Shot 2022-07-31 at 10.27.40 PM.png" alt="Screen Shot 2022-07-31 at 10.27.40 PM" style="zoom:50%;" />
 
 
 

@@ -148,10 +148,11 @@ CUDA runtime只有在确保一个block所需要的全部resource都有的时候�
 > Reference
 >
 > 1. Programming Massively Parallel Processors 3rd edition chapter 3
+> 1. Professional CUDA C Programming chapter 3
 
 
 
-同样的代码，在拥有不同资源的硬件(多少个SM)上都可以运行。
+The ability to execute the same application code on a varying number of compute cores is referred to as transparent scalability. 同样的代码，在拥有不同资源的硬件(多少个SM)上都可以运行。
 
 blocks can execute in any order relative to each other, which allows for transparent scalability across different devices 不同的block之间的运行顺序是不确定的
 
@@ -168,96 +169,83 @@ CUDA为了保证transparent scalability，所以不允许block之间的synchroni
 
 ### Branch Divergence
 
-GPU对于每一个thread使用predicated execution。
+> Reference
+>
+> 1. Professional CUDA C Programming chapter 3
 
-如果一个warp内的多个thread会走不同的path，则multiple path被实际运行。
+
+
+#### 是什么
+
+如果一个warp内的多个thread会走不同的path，则multiple path会被serialized的运行
 
 ```cpp
-if ( threadIdx.x > 2 )
-{
-  // path 1
-}
-else
-{
-  // path 2
+__global__ void mathKernel1(float *c) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x; 
+  float a, b;
+  a = b = 0.0f;
+  if (tid % 2 == 0) { 
+    a = 100.0f;
+	} else {
+		b = 200.0f;
+	}
+	c[tid] = a + b; 
 }
 ```
+
+<img src="Note.assets/Screen Shot 2022-07-31 at 6.07.10 PM.png" alt="Screen Shot 2022-07-31 at 6.07.10 PM" style="zoom:50%;" />
+
+
 
 如果代码中有branching (if else)，但是warp内的thread只走一个path(都走了if condition)，不会有branching
 
 一个解决branching的常用方法就是branch granularity是warp的倍数、这样就能保证一个warp内的全部thread都只走一个brach，而且依旧two cotrol path
 
 ```cpp
-if ( threadIdx.x / WARP_SIZE > 2 )
+__global__ void mathKernel2(void) 
 {
-  // path 1
-}
-else
-{
-  // path2
+  int tid = blockIdx.x * blockDim.x + threadIdx.x; 
+  float a, b;
+  a = b = 0.0f;
+  if ((tid / warpSize) % 2 == 0) { 
+    a = 100.0f;
+  } else {
+  	b = 200.0f;
+  }
+  c[tid] = a + b; 
 }
 ```
 
 
 
-### Hide Latency
+#### Predicate Variable
 
-> Reference
->
-> 1. CUDA C++ Programming Guide chapter 5.2.3
-> 1. CUDA C++ Best practice guide 11.2
+ CUDA compiler optimization that replaces branch instructions (which cause actual con- trol flow to diverge) with predicated instructions for short, conditional code segments. 对于branch body小的branch，compiler会使用predicate instruction来代替branch
 
-
-
-#### Why & How GPU Hide latency
-
-CUDA sm 计算资源的使用率与num resident warps in SM直接相关。每次issue instruction, warp scheduler会选择1个instruction来运行（可能来自于同一个warp/不同的warp）
-
-latency是num clock cycle一个warp可以运行下一个instruction(从waiting变为ready status)。
-
-充分利用sm 硬件是通过让warp scheduler总能找到某些instruction来issue，当等待前一个warp的latency。也就是我们希望有尽量多个instruction ready to be executed. 
-
-从编程的角度，希望更多的warp resident in SM + instruction independent 
-
-Much of this global memory latency can be hidden by the thread scheduler if there are sufficient independent arithmetic instructions that can be issued while waiting for the global memory access to complete.
+In branch predication, a predicate variable for each thread is set to 1 or 0 according to a condi- tional. Both conditional flow paths are fully executed, but only instructions with a predicate of 1 are executed. Instructions with a predicate of 0 do not, but the corresponding thread does not stall either. 通过使用predicate variable来代替branch 
 
 
 
-* Hide L cycle latency需要所少个instruction
+下面的例子里通过directely expose branch predication来调用compiler优化。
 
-cc 5.x 6.1 6.2 7.x 8.x : 4L, 因为4个warp scheduler, 每个clock cycle可以issue1个instruction per warp scheduler
+运行的速度与上面mathKernel2中以warp granularity切分的一样
 
-cc 6.0 : 2L, 因为两个warp scheduler,  每个clock cycle可以issue1个instruction per warp scheduler
-
-cc 3.x : 8L : 因为4个warp scheduler, 每个clock cycle可以issue 2个instruction per warp scheduler
-
-
-
-#### Source of latency
-
-##### register dependencies
-
-当全部的operands在register上的时候，由于register dependency导致latency，前一个instruction还没有运行结束，没有把结果放到对应register中，导致当前instruction依赖的数据还没有在register
-
-
-
-cc 7.x arithmetic instruction 需要 16 warp来hide latency，因为计算操作一般是4 clock cycle，需要4*4(L=4)=16 instruction/warps (cc 7.x 每个warp scheduler issue 1 instruction per clock cycle)。如果ready warp数量不够16的话，会导致idle
-
-
-
-##### Off-chip memory 
-
-当arithemetic intensity低的时候，需要更多的warp来hide latency。
-
-
-
-##### sync thread block
-
-syncthread 会导致latency (warp not ready to execute next instruction due to barrier)
-
-让sm有更多的resident block可以reduce idle in this case. 当一个block存在syncthread idle的时候，其余block的warp可以运行来hide latency
-
-需要注意的是larger block size并不意味着higher occupancy, 因为sync导致的idle以及resource按照block为单位进行分配
+```cpp
+__global__ void mathKernel3(float *c) 
+{
+	int tid = blockIdx.x * blockDim.x + threadIdx.x; 
+  float ia, ib;
+  ia = ib = 0.0f;
+  bool ipred = (tid % 2 == 0); 
+  if (ipred) {
+		ia = 100.0f; 
+  }
+	if (!ipred) { 
+    ib = 200.0f;
+	}
+	c[tid] = ia + ib; 
+}
+```
 
 
 
@@ -639,7 +627,7 @@ SM resource是动态分配给每一个block的，resource是有限的，需要�
 
 
 
-##### 常见限制
+* 常见resource constrain
 
 1. num threads per sm
 2. Num registers per sm
@@ -754,6 +742,8 @@ number of active warp on sm / maximum number of possible active warp
 
 理解为percentage of hardware's abaility to process warp that's actively in use
 
+<img src="Note.assets/Screen Shot 2022-07-31 at 6.38.35 PM.png" alt="Screen Shot 2022-07-31 at 6.38.35 PM" style="zoom:50%;" />
+
 
 
 * 对程序的影响
@@ -786,10 +776,9 @@ lower occupancy一般意味着unable to hide latency, 导致perf不好
 
 
 
-## Scheduling
+## Scheduling & Latency Hiding
 
-
-### warp scheduling
+### Warp Unit Scheduling
 
 warp是sm内部的schedule unit。
 
@@ -801,7 +790,7 @@ warp within a block can be execute in any order w.r.t each other
 
 
 
-* 为什么使用warp
+* 为什么使用warp作为basic scheduling/control unit
 
 为了share control unit
 
@@ -827,19 +816,37 @@ warp within a block can be execute in any order w.r.t each other
 
 
 
-##### threads的状态
+#### Active Warp
 
-1. all thread inside block not scheduled on SM
-2. all thread inside block scheduled on SM
-   1. Warp that's SM is currently executing
-   2. Warp that ready to be executed by SM
-   3. Warp that not ready to be executed because of dependency (e.g. load memory not finish yet)
+> Reference
+>
+> 1. Professional CUDA C Programming Guide
+
+
+
+active block: A thread block is called an active block when compute resources, such as registers and shared mem- ory, have been allocated to it. 一个block所需要的资源已经被SM分配，block threads等待运行，叫做active block
+
+active warps: active block包含的warp叫做active warp. 
+
+The warp schedulers on an SM select active warps on every cycle and dispatch them to execution units. SM会选择active warp来进行运行
+
+根据compute capacity的不同，不同的GPU会有不同的max num active warp per SM. Kepler support max 64 warp per SM.
+
+
+
+active warp类型
+
+1. selected warp: warp is actively executing
+2. stalled warp: warp is not ready for execution
+3. eligible warp :  active warp is ready for exe- cution but not currently executing
 
 
 
 #### Zero-overhead scheduling
 
 是什么：selection of ready warps for execution avoid introducing idle or waisting time into execution timeline. 
+
+Switching between concurrent warps has no overhead because hardware resources are partitioned among all threads and blocks on an SM, so the state of the newly scheduled warp is already stored on the SM. 因为GPU在运行kernel之前已经把全部的resource申请了，所以switch to new warp的时候这个new warp的资源已经在GPU上了
 
 如果有sufficent resident warp，则hardware will likely find warp to execute at any point in time.
 
@@ -883,6 +890,88 @@ Note that in the diagram above, the core has the ability to maintain execution c
 
 
 Do not confuse the requirement that all CUDA threads (or their corresponding warps) in a thread block must be live--a.k.a. occupying an execution context on a core-- during the lifetime of the thread block (a requirement that we discuss again on slide 73) with the fact that the core can indeed run instructions from multiple threads simultaneously on its parallel execution units. It seems to me that interleaved multi-threading and simultaneous execution of instructions from multiple threads are being confused in some of the comments posted above. 一个block内thread只要运行的时候就是都active的，因为SM是以block为单位分配资源。
+
+
+
+### Latency Hiding
+
+> Reference
+>
+> 1. CUDA C++ Programming Guide chapter 5.2.3
+> 2. CUDA C++ Best practice guide 11.2
+> 3. Professional CUDA C Programming Guide chapter 3
+
+
+
+#### Why & How GPU Hide latency
+
+Latency hiding depends on the number of active warps per SM. CUDA sm 计算资源的使用率与num active warps in SM直接相关。每次issue instruction, warp scheduler会选择1个instruction来运行（可能来自于同一个warp/不同的warp）
+
+latency是num clock cycle一个warp可以运行下一个instruction(从waiting变为ready status)。
+
+充分利用sm 硬件是通过让warp scheduler总能找到某些instruction来issue，当等待前一个warp的latency。也就是我们希望有尽量多个instruction ready to be executed. 
+
+从编程的角度，希望更多的warp resident in SM + instruction independent 
+
+Much of this global memory latency can be hidden by the thread scheduler if there are sufficient independent arithmetic instructions that can be issued while waiting for the global memory access to complete.
+
+
+
+Figure 3.15显示了latency hiding with zero-overhead waro scheduling. scheduler 0有足够的eligable warp，可以通过运行其余的warp来hide latency。scheduler 1没有足够的eligable warp，只能通过stall来hide latency
+
+<img src="Note.assets/Screen Shot 2022-07-31 at 6.29.00 PM.png" alt="Screen Shot 2022-07-31 at 6.29.00 PM" style="zoom:50%;" />
+
+
+
+#### Number of required warps to hide latency
+
+从Little's law推导可以知道下面的公式
+
+<img src="Note.assets/Screen Shot 2022-07-31 at 6.31.15 PM.png" alt="Screen Shot 2022-07-31 at 6.31.15 PM" style="zoom:50%;" />
+
+<img src="Note.assets/Screen Shot 2022-07-31 at 6.31.24 PM.png" alt="Screen Shot 2022-07-31 at 6.31.24 PM" style="zoom:50%;" />
+
+
+
+* Hide L cycle latency需要所少个instruction
+
+cc 5.x 6.1 6.2 7.x 8.x : 4L, 因为4个warp scheduler, 每个clock cycle可以issue1个instruction per warp scheduler
+
+cc 6.0 : 2L, 因为两个warp scheduler,  每个clock cycle可以issue1个instruction per warp scheduler
+
+cc 3.x : 8L : 因为4个warp scheduler, 每个clock cycle可以issue 2个instruction per warp scheduler
+
+
+
+cc 2.x: Fermi have 32 single-precision floating point pipelines (throughput) and latency of one arithemetic instruction is 20 cycles (latency), min of 20 * 32 = 640 threads = 20 warps per SM needed to keep device busy.
+
+
+
+#### Source of latency
+
+##### register dependencies
+
+当全部的operands在register上的时候，由于register dependency导致latency，前一个instruction还没有运行结束，没有把结果放到对应register中，导致当前instruction依赖的数据还没有在register
+
+
+
+cc 7.x arithmetic instruction 需要 16 warp来hide latency，因为计算操作一般是4 clock cycle，需要4*4(L=4)=16 instruction/warps (cc 7.x 每个warp scheduler issue 1 instruction per clock cycle)。如果ready warp数量不够16的话，会导致idle
+
+
+
+##### Off-chip memory 
+
+当arithemetic intensity低的时候，需要更多的warp来hide latency。
+
+
+
+##### sync thread block
+
+syncthread 会导致latency (warp not ready to execute next instruction due to barrier)
+
+让sm有更多的resident block可以reduce idle in this case. 当一个block存在syncthread idle的时候，其余block的warp可以运行来hide latency
+
+需要注意的是larger block size并不意味着higher occupancy, 因为sync导致的idle以及resource按照block为单位进行分配
 
 
 
@@ -1577,6 +1666,7 @@ for (i=0; i<nStreams; i++)
 > 1. Programming Massively Parallel Processors 3rd edition Chapter 13
 > 1. C++ Programming Guide Appendix D
 > 1. UIUC ECE 508 Lecture 9
+> 1. Professional CUDA C Programming chapter 3
 
 
 
@@ -1881,6 +1971,8 @@ The grid launch is posted to the device and will execute independently of the pa
 
 Only the device on which a kernel is running will be controllable from that kernel. 也就代表着child kernel只能在当前device上运行，不可能跨device运行
 
+When a parent launches a child grid, the child is not guaranteed to begin execution until the parent thread block explicitly synchronizes on the child. 和host代码相似，launch不代表运行，只有parent sync的时候才一定保证child的运行
+
 
 
 #### Explicit Parent Child Sync
@@ -1890,6 +1982,8 @@ Only the device on which a kernel is running will be controllable from that kern
 kernel launches from the device are non- blocking. 
 
 A thread that invokes `cudaDeviceSynchronize()` call will wait until all kernels launched by any thread in the thread-block have completed.  注意（1）这里是caller thread会等待整个thread block在call之前启动的全部child kernel运行结束。（2）这里的sync是只针对caller thread的，如果想让整个thread block都等待child kernel运行结束，还需要使用`__syncthreads()`
+
+Grid launches in a device thread are visible across a thread block. This means that a thread may synchronize on the child grids launched by that thread or by other threads in the same thread block. parent block中任何一个thread都可以sync 由parent block启动的child block
 
 
 
@@ -1937,6 +2031,12 @@ __device__ void func()
 
 
 <img src="Note.assets/Screen Shot 2022-07-26 at 2.52.23 PM.png" alt="Screen Shot 2022-07-26 at 2.52.23 PM" style="zoom:50%;" />
+
+
+
+下面的例子中parent kernel white space就是用来显示parent wait for child to finish before terminate
+
+<img src="Note.assets/Screen Shot 2022-07-31 at 11.51.59 AM.png" alt="Screen Shot 2022-07-31 at 11.51.59 AM" style="zoom:50%;" />
 
 
 
@@ -2104,6 +2204,8 @@ parent thread idx 和 parent block idx 可以使用binary search计算得到
 > Reference
 >
 > 1. NVDIA TECH BLOG Cooperative Groups: Flexible CUDA Thread Programming [link](https://developer.nvidia.com/blog/cooperative-groups/)
+
+
 
 * 是什么
 
