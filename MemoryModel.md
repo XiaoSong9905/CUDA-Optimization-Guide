@@ -696,6 +696,8 @@ By simply increasing this parameter (without modifying the kernel), it is possib
 
 只可以分配为1D
 
+dynamic shared memory有一些小的overhead，比起使用static shared memory
+
 ```cpp
 extern __shared__ int tile[];
 
@@ -720,7 +722,7 @@ __shared__ float a[size_x][size_y];
 >
 > 1. Professional CUDA C Programming Guide chapter 5
 
-L1 + Shared 一共有64 kb memory
+L1 + Shared 一共有64 kb memory (在某些device上)
 
 shared memory使用32 bank访问。L1 cache使用cache line来访问。
 
@@ -747,8 +749,6 @@ Launching a kernel with a different preference than the most recent preference s
 ```cpp
 cudaError_t cudaFuncSetCacheConfig(const void* func, enum cudaFuncCacheca cheConfig);
 ```
-
-
 
 
 
@@ -811,7 +811,7 @@ shared memory bank width: defines which shared memory addresses are in which sha
 
 
 
-* Fermi 2.x (and all cc except 3,x)
+##### Fermi 2.x (and all cc except 3,x)
 
 For a Fermi (2.x) device, the bank width is 32-bits and there are 32 banks. Each bank has a bandwidth of 32 bits per two clock cycles. Successive 32-bit words map to successive banks. (also apply for none 3.x device, only differ in number of clock cycle per transaction)
 
@@ -825,7 +825,7 @@ Figure 5-5 上面是bytes address对应word indx。下面是word index对应bank
 
 
 
-* Kepler 3.x
+##### Kepler 3.x
 
 For Kepler devices, shared memory has 32 banks with 64-bit mode and 32-bit mode.
 
@@ -931,6 +931,107 @@ In the “load from global, store into shared, do quadratic computation on share
 shared memory is fast even if there are bank conflicts. Even with 16-way bank conflicts, shared memory is dozens of times faster than gobal memory. shared memory就算是有bank conflict也比global memory要快很多
 
 many people get too worried about bank conflicts. Optimize for bank conflicts last, especially if they are only 2- or 4-way conflicts, which may take more instructions to optimize away than they cost anyway.  有些时候为了避免shared memory bank conflict从而做了很多优化，但是由于额外的增加intrinsic，导致perf反而变差
+
+
+
+
+
+### Data Layout
+
+#### Square Shared Memory
+
+<img src="Note.assets/Screen Shot 2022-08-01 at 11.56.00 PM.png" alt="Screen Shot 2022-08-01 at 11.56.00 PM" style="zoom:50%;" />
+
+
+
+```cpp
+__shared__ int tile[N][N];
+
+// contigious thread access row of shared memory (contigious)
+tile[threadIdx.y][threadIdx.x];
+
+// contigious thread access col of shared memory (stride)
+tile[threadIdx.x][threadIdx.y];
+```
+
+
+
+* padding
+
+```cpp
+__shared__ int tile[BDIMY][BDIMX+1];
+```
+
+
+
+#### Rectangle Shared Memory
+
+```cpp
+#define BDIMX 32 // 32 col
+#define BDIMY 16 // 16 row
+
+dim3 block (BDIMX,BDIMY); 
+dim3 grid (1,1);
+
+// row-major read (setRowReadRow)
+// the length of the innermost dimension of the shared memory array tile is set to the same dimension as the innermost dimension of the 2D thread block:
+// contigious thread read row of shared memory (contigious)
+__shared__ int tile[BDIMY][BDIMX];
+
+
+// col-major read (setColReadCol)
+// the length of the innermost dimension of the shared memory array tile is set to the same dimension as the outermost dimension of the 2D thread block:
+// contigious thread read col of shared memory (stride)
+__shared__ int tile[BDIMX][BDIMY];
+
+```
+
+
+
+* performence (nvprof)
+
+<img src="Note.assets/Screen Shot 2022-08-02 at 12.06.57 PM.png" alt="Screen Shot 2022-08-02 at 12.06.57 PM" style="zoom:50%;" />
+
+The Kepler K40 bank width is eight words, and 16 4-byte data elements in a column are arranged into eight banks.
+
+
+
+* writing row-major and reading column major
+
+重点是计算出new coordinate in the transposed block
+
+```cpp
+__global__ void setRowReadCol(int *out) { 
+  // static shared memory
+  __shared__ int tile[BDIMY][BDIMX];
+  // mapping from 2D thread index to linear memory
+  unsigned int idx = threadIdx.y * blockDim.x + threadIdx.x;
+  // convert idx to transposed coordinate (row, col) 
+  unsigned int irow = idx / blockDim.y;
+  unsigned int icol = idx % blockDim.y;
+  // shared memory store operation 
+  tile[threadIdx.y][threadIdx.x] = idx;
+  // wait for all threads to complete 
+  __syncthreads();
+  // shared memory load operation
+  out[idx] = tile[icol][irow]; 
+}
+```
+
+
+
+* padding 
+
+对于32-bit bank，padding 1
+
+对于64-bit bank，padding取决于data
+
+在上面的例子里，padding 2 element for 64-bit bank
+
+```cpp
+#define NPAD 2
+__shared__ int tile[BDIMY][BDIMX + NPAD];
+```
 
 
 

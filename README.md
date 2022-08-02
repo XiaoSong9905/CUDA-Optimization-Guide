@@ -6,7 +6,7 @@ This repo was originally part of my [HPC Note](https://github.com/XiaoSong9905/H
 
 Correction on mistakes is highly welcomed. Please post a issue if you found one.
 
-To open markdown file with better format (e.g. proper image resize, spacing, etc), [typora](https://typora.io) is recommended (its beta version is free).
+To open markdown file with better format (e.g. proper image resize, spacing, side bar, etc), [typora](https://typora.io) is recommended (its beta version is free).
 
 
 

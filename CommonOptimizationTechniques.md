@@ -367,6 +367,7 @@ GPU上由于thread的总数量很多，使用privitization需要注意
 #### Example
 
 1. Prefix-sum three phase
+1. reduction 
 
 
 

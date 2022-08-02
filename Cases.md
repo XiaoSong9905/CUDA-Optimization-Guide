@@ -496,6 +496,167 @@ stencil难点: memory intense & little computation (one fma per load value)
 
 
 
+### Transpose 
+
+> Reference
+>
+> 1. Professional CUDA C Programming chapter 5
+
+
+
+#### Baseline
+
+* lower bound: native global memory transpose
+
+coarlesed read
+
+stride write causing multiple memory transaction per request
+
+```cpp
+__global__ void naiveGmem(float *out, float *in, const int nx, const int ny) {
+  
+  // matrix coordinate (ix,iy) 
+  // 相当于global index
+  unsigned int ix = blockIdx.x * blockDim.x + threadIdx.x;
+  unsigned int iy = blockIdx.y * blockDim.y + threadIdx.y;
+
+  // transpose with boundary test
+  if ( ix < nx && iy < ny )
+    out[ix * ny + iy] = in[iy * nx + ix];
+}
+```
+
+
+
+* upper bound : memory copy kernel
+
+coarlesed read, coarlesed write
+
+```cpp
+__global__ void copyGmem(float *out, float *in, const int nx, const int ny) { 
+  // matrix coordinate (ix,iy)
+  unsigned int ix = blockIdx.x * blockDim.x + threadIdx.x;
+  unsigned int iy = blockIdx.y * blockDim.y + threadIdx.y;
+  // transpose with boundary test 
+  if (ix < nx && iy < ny) {
+  	out[iy * nx + ix] = in[iy * nx + ix]; 
+  }
+}
+```
+
+
+
+* setting
+
+4096 * 4096 matrix
+
+2D thread block of dim 32 (block height)* 16 (block width)
+
+
+
+#### Rectangle Shared Memory
+
+<img src="Note.assets/Screen Shot 2022-08-02 at 11.45.29 AM.png" alt="Screen Shot 2022-08-02 at 11.45.29 AM" style="zoom:50%;" />
+
+<img src="Note.assets/Screen Shot 2022-08-02 at 11.46.05 AM.png" alt="Screen Shot 2022-08-02 at 11.46.05 AM" style="zoom:50%;" />
+
+
+
+1. warp coarlesed read row from original matrix
+2. warp write data to shared memory using row-major order
+3. synchronize
+4. warp read column, bank conflict happen
+5. coarlesed write data to transposed matrix
+
+
+
+```cpp
+ __global__ void transposeSmem(float *out, float *in, int nx, int ny) {
+       // static shared memory
+   		// BDIMY : 32
+   		// BDIMX : 16
+       __shared__ float tile[BDIMY][BDIMX];
+       // coordinate in original matrix
+       unsigned int ix,iy,ti,to;
+       ix = blockIdx.x *blockDim.x + threadIdx.x;
+       iy = blockIdx.y *blockDim.y + threadIdx.y;
+       // linear global memory index for original matrix
+       ti = iy*nx + ix;
+   
+   		 // 下面的部分是比较重要的
+       // thread index in transposed block
+       unsigned int bidx,irow,icol;
+       bidx = threadIdx.y*blockDim.x + threadIdx.x;
+       irow = bidx/blockDim.y;
+       icol = bidx%blockDim.y;
+       // coordinate in transposed matrix
+       ix = blockIdx.y * blockDim.y + icol;
+       iy = blockIdx.x * blockDim.x  + irow;
+       // linear global memory index for transposed matrix
+       to = iy*ny + ix;
+       // transpose with boundary test
+       if (ix < nx && iy < ny)
+       {
+          // load data from global memory to shared memory
+          tile[threadIdx.y][threadIdx.x] = in[ti];
+          // thread synchronization
+          __syncthreads();
+          // store data to global memory from shared memory
+          out[to] = tile[icol][irow];
+       }
+}
+```
+
+
+
+* performence on Tesla K40
+
+<img src="Note.assets/Screen Shot 2022-08-02 at 11.49.44 AM.png" alt="Screen Shot 2022-08-02 at 11.49.44 AM" style="zoom:50%;" />
+
+ Because the block width in the trans- posed block is 16, the writes of the first half of a warp and the second half of a warp are strided by 4,080; therefore, a warp request to write to global memory is serviced by two transactions. Changing the thread block size to 32x32 would reduce the replay count to 1. However, a thread block configuration of 32x16 exposes more parallelism than the 32x32 launch configuration. 
+
+
+
+<img src="Note.assets/Screen Shot 2022-08-02 at 11.54.57 AM.png" alt="Screen Shot 2022-08-02 at 11.54.57 AM" style="zoom:50%;" />
+
+reads from a column of the 2D shared memory array create bank conflicts. Running this kernel on the Tesla M2090 would yield a replay of 16 transactions.  Tesla K40 has a bank width of 8 bytes, leading to a reduction in bank-conflicts by half.
+
+
+
+#### Rectangle Shared Memory Padded
+
+通过padding来去除bank conflict
+
+For the tested kernel with a 32×16 thread block, two columns of padding must be added for a Tesla K40 and one column for a Tesla M2090
+
+```cpp
+__shared__ float tile[BDIMY][BDIMX + 2];
+```
+
+
+
+* performence
+
+<img src="Note.assets/Screen Shot 2022-08-02 at 11.56.53 AM.png" alt="Screen Shot 2022-08-02 at 11.56.53 AM" style="zoom:50%;" />
+
+
+
+#### Unroll
+
+Each thread now transposes two data elements strided by one data block. The goal of this transformation is to improve device memory bandwidth utilization by creating more simultaneous in-flight loads and stores. 通过增加memory in the fly来增加independeny memory transaction
+
+<img src="Note.assets/Screen Shot 2022-08-02 at 11.57.46 AM.png" alt="Screen Shot 2022-08-02 at 11.57.46 AM" style="zoom:50%;" />
+
+
+
+#### Tunning
+
+尝试不同的block size，最后发现16x16的效果最好。
+
+<img src="Note.assets/Screen Shot 2022-08-02 at 11.59.16 AM.png" alt="Screen Shot 2022-08-02 at 11.59.16 AM" style="zoom:50%;" />
+
+
+
 ### GEMM C=AB
 
 > Reference
@@ -1939,13 +2100,17 @@ stride 变小 with iteration
 
 结合sequential与parallel reduction。(sequential)每个thread首先从global memory读取多个值，sum up in register, 然后放到shared memory。(parallel) threads within block 从shared memory读取数据，parallel reduction。
 
-与上面的on-the-fly 计算的概念是一样的
-
 
 
 * 为什么
 
 保证了每个thread都有一些work来做(sequential 的部分每个threa都进行相加，相比起完全parallel的情况下只有部分thread相加)，减少shared  memory的使用
+
+目的是为了enableing multiple I/O operation to be in-fligt at once. 如果没有使用algorithm cascading的话，在一开始访问global memory会因为没有足够的I/O operation in the flight导致一些stall，所以还不如利用好这个机会来issue enough I/O operation in the flight从而更好的hide latency
+
+with more global load operations in flight at once, the GPU has more flexibility in scheduling them concurrently, potentially leading to better global memory utilization.
+
+The load throughput has increased 2.57 times and store throughput has decreased 1.56 times. The load throughput increase is attributed to a greater number of simultaneous load requests.
 
 
 
