@@ -164,8 +164,29 @@ CUDA为了保证transparent scalability，所以不允许block之间的synchroni
 
 
 
-
 ## Warp & Thread
+
+#### Map block to warp
+
+thread block goes by x index first, then y index, then z index. 
+
+3D case thread id = threadIdx.x + blockDim.x * ( threadIdx.y + blockDim.y * threadIdx.z )
+
+2D case thread id = threadIdx.x + blockDim.x * threadIdx.y
+
+warp id = thread id % 32
+
+
+
+* example
+
+dimBlock=(16, 16), this means blockdim.x = 16
+
+threadIdx.y / 2 = same number = same warp = warp id
+
+threadIdx.x + 16 * ( threadIdx.y % 2 ) = lane id
+
+
 
 ### Branch Divergence
 
@@ -877,7 +898,7 @@ GPU的warp一旦分配到资源，就会占用资源直到block整个运行结�
 Each clock, the GTX 980 SMM core:
 
 1. Selects up to four unique, runnable warps to run instructions from. These four warps can come from any thread block currently active on the core. This is an instance of simultaneous multi-threading (lecture 2). 每个clock，会从64个active warp中选择4个active wap。（active warp的定义是sm maintain warp execution context)。这里的平行是**simutaneous multi-threading**。之所以能选择4个warp是因为有4个warp scheduler (以及对应的pc)
-2. From each of these four warps, the clock attempts to find up to two instructions to execute. This is instruction level parallelism (lecture 1) within the warp. If independent instructions are not present in the warp's instruction stream, then only one instruction from the warp can be executed. There is no ILP in the instruction stream! 每个clock，每个warp (out of 4)，会选择两个独立的instruction来运行。如果找不到两个独立的instruction来运行的话，则运行一个instruction。这里的平行是**ILP**. 这里independent instruction指的是会使用seprate functional units in SM
+2. From each of these four warps, the clock attempts to find up to two instructions to execute. This is instruction level parallelism (lecture 1) within the warp. If independent instructions are not present in the warp's instruction stream, then only one instruction from the warp can be executed. There is no ILP in the instruction stream! 每个clock，每个warp (out of 4)，会选择两个独立的instruction来运行 (并非每个GPU arch都可以双发，Volta就不可以双发)。如果找不到两个独立的instruction来运行的话，则运行一个instruction。这里的平行是**ILP**. 这里independent instruction指的是会使用seprate functional units in SM
    1. e.g. 如果程序中有两个独立的FMA，SM硬件中有两组FMA，则在一个clock cycle内这两个FMA会同时运行
    1. 一般GPU支持两种parallel的方式。thread level parallel (也就是同时运行多个warp)还有instruction level parallel（也就是一个thread内的前后两个independent instruction可以在一个clock cycle内运行）
    
@@ -917,7 +938,7 @@ Much of this global memory latency can be hidden by the thread scheduler if ther
 
 
 
-Figure 3.15显示了latency hiding with zero-overhead waro scheduling. scheduler 0有足够的eligable warp，可以通过运行其余的warp来hide latency。scheduler 1没有足够的eligable warp，只能通过stall来hide latency
+Figure 3.15显示了latency hiding with zero-overhead waro scheduling (实际上switch to another warp会产生1 clock cycle latency，但是这个值足够的小，忽略就可以). scheduler 0有足够的eligable warp，可以通过运行其余的warp来hide latency。scheduler 1没有足够的eligable warp，只能通过stall来hide latency
 
 <img src="Note.assets/Screen Shot 2022-07-31 at 6.29.00 PM.png" alt="Screen Shot 2022-07-31 at 6.29.00 PM" style="zoom:50%;" />
 

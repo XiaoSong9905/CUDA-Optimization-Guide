@@ -159,51 +159,24 @@
 
 ## 7.x Volta & Turing
 
-### Resource
-
 * each SM
 
-1. 64 FP32 cores for single-precision arithmetic operations,
-2. 32 FP64 cores for double-precision arithmetic operations, 33
-3. 64 INT32 cores for integer math,
-4. 8 mixed-precision Tensor Cores for deep learning matrix arithmetic
-5. 16 special function units for single-precision floating-point transcendental functions,
-6. 4 warp schedulers
-7. read only constant cache 用于 constant memory space
-8. unified L1 & shared memory of size 128 KB (volta) / 96 KB (Turing)
-   1. can be configued. 
+1. 4 processing block, each contain 
+   1. 16 FP32, 16 INT32, 8 FP64, 2 tensor core, L0 instruction cache, one warp scheduler, one dispatch unit, and 64KB Register file
+   2. static distribute warp among schedulers. each scheduler issue one instruction for one of its assigned warp per clock cycle. 支持independent thread scheduling
+
+2. read only constant cache 用于 constant memory space
+3. unified L1 & shared memory of size 128 KB (volta) / 96 KB (Turing)
+   1. can be configued between l1 & shared memory. 
    2. driver automatically configures the shared memory capacity for each kernel to avoid shared memory occupancy bottlenecks while also allowing concurrent execution with already launched kernels where possible. In most cases, the driver's default behavior should provide optimal performance. 自动config shared memory的大小，大多数情况是optimal的
    3. default enable L1 cache for global memory access
+   4. smem bank same as Fermi.
 
 
 
-### Schedule
+* Across SM
 
-static distribute warp among schedulers
-
-each scheduler issue one instruction for one of its assigned warp per clock cycle
-
-支持independent thread scheduling
-
-
-
-### global memory
-
-Same as 5.x
-
-
-
-### shared memory
-
-driver会自动选择optimal conf
-
-使用cudaFuncSetAttribute() 设定shared memory比例 on per kernel bases，现在是一个hint，driver可以选择运行其余的config
-
-原来使用cudaFuncSetCacheConfig()设定shared memory比例，这是一个强制要求的API
-
-
-
-shared memory bank same as 5.x
+L2 cache
 
 
 

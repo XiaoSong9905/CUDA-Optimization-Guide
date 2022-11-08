@@ -562,10 +562,10 @@ __global__ void copyGmem(float *out, float *in, const int nx, const int ny) {
 
 
 
-1. warp coarlesed read row from original matrix
+1. warp coarlesed read row from original matrix. 紫色的部分对应一个或者多个warp
 2. warp write data to shared memory using row-major order
 3. synchronize
-4. warp read column, bank conflict happen
+4. warp read column, bank conflict happen. 蓝色的部分对应一个或者多个warp
 5. coarlesed write data to transposed matrix
 
 
@@ -693,7 +693,7 @@ void GEMM(float* M, float* N, float* P, int width)
 
 
 
-#### Simple CUDA Code
+#### Naive CUDA Code
 
 ```cpp
 __global__ 
@@ -747,6 +747,44 @@ Load 1 N 1 M element : 4 bytes each, total 8 bytes
 
 
 
+* memory coarlesed 分析
+
+下面的例子中，每个thread沿着黑色的箭头访问4个元素。对于N的访问中每个thread访问一个column。对于M的访问中每个thread访问一个row。数据是row major order的。不同的颜色对应不同的step
+
+
+
+对于N的访问：
+
+是coarlesed的
+
+在step1中4个thread访问的内存（N00,N01,N02,N03，黄色的部分) 在virtual memory中是连续的（在物理内存上会被分配到多个bank，多个channel中）
+
+在step2中，访问新的连续的内存。
+
+<img src="Note.assets/Screen Shot 2022-05-31 at 12.09.35 AM.png" alt="Screen Shot 2022-05-31 at 12.09.35 AM" style="zoom:50%;" />
+
+
+
+对于M的访问：
+
+不是coalesced的
+
+每个thread读取的数据都会导致一次memory burst。
+
+Step1的4个value(M00,M10,M20,M30)需要4个burst(每个burst对应一个颜色)。由于burst buffer只有一个，在step 1访问结束后只有最后访问的burst依旧留在burst buffer中。
+
+step2的4个value访问(M01,M11,M21,M31)需要重新传送4个burst。
+
+<img src="Note.assets/Screen Shot 2022-05-31 at 12.10.24 AM.png" alt="Screen Shot 2022-05-31 at 12.10.24 AM" style="zoom:50%;" />
+
+
+
+* performence 分析
+
+naive cuda code中，load两个元素，进行一次FMA计算，计算访存比低
+
+
+
 #### Simple Blocked CUDA Code
 
 >  Reference
@@ -783,7 +821,7 @@ __global__ void simpleMultiply(float *a, float* b, float *c, int N)
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     float sum = 0.0f;
-    for (int i = 0; i < TILE_DIM; i++) {
+    for (int i = 0; i < TILE_DIM; i++) { // TILE_DIM=32
       sum += a[row*TILE_DIM+i] * b[i*N+col];
     }
     c[row*N+col] = sum;
@@ -859,153 +897,186 @@ __global__ void coalescedMultiply(float *a, float* b, float *c, int N)
 
 
 
-#### Tiling shared memory for A&B / M&N
+#### Tiling shared memory
 
 * 假设
 
 假设 M N P 是 square matrix
 
-single threads for each P_ij, parallize computation of elements of P
+single threads for each output element P_ij, parallize computation of elements of P
 
 block size in 2D of TILE_WIDTH * TILE_WIDTH
 
 grid size in 2D of ceil( width / TILE_WIDTH ) * ceil( width / TILE_WIDTH )
 
-<img src="Note.assets/Screen Shot 2021-11-07 at 1.38.09 PM.png" alt="Screen Shot 2021-11-07 at 1.38.09 PM" style="zoom:40%;" />
+把数据放到shared memory中（速度更快）从而做到数据复用(访问shared memory而不是global mmeory）。每一个thread block负责计算seprate output tiles。
 
 
 
-解决方法：把数据放到shared memory中（速度更快）从而做到数据复用。每一个thread block负责计算seprate ties。
+下面图片中，不同颜色的M N代表不同iteration（code中q）所使用的tile M and tile N
 
-<img src="Note.assets/Screen Shot 2022-05-30 at 6.14.43 PM.png" alt="Screen Shot 2022-05-30 at 6.14.43 PM" style="zoom:40%;" />
-
-<img src="Note.assets/Screen Shot 2021-11-07 at 5.03.38 PM.png" alt="Screen Shot 2021-11-07 at 5.03.38 PM" style="zoom:40%;" />
+<img src="Note.assets/Screen Shot 2022-08-18 at 3.40.59 PM.png" alt="Screen Shot 2022-08-18 at 3.40.59 PM" style="zoom:30%;" />
 
 
 
-* code
-
-假设square tile + square matrix的情况。每一个thread会负责load 1 M elem，load 1 N elem，write 1 P elem
-
-当使用了shared memory的时候，第一个想法就是注意需要有synchronize
-
-这里因为 a warp reads data from shared memory that were written to shared memory by different warps.  所以不能再使用syncwarp，只能使用syncthread
-
-**对于每一个M N中的input数据，通过tile的方法，被复用TILE_WIDTH次。**
+##### code
 
 ```cpp
 __global__ void SquareMatrixKernel1( float* d_M, float* d_N, float* d_P, int width )
 {
+  // each thread block in charge of completely compute one output tile
   __shared__ float subTileM[TILE_WIDTH][TILE_WIDTH];
   __shared__ float subTilen[TILE_WIDTH][TILE_WIDTH];
 
+  // grid index
   int bx = blockIdx.x;
   int by = blockIdx.y;
+  // index within block
   int tx = threadIdx.x;
   int ty = threadIdx.y;
 
-  // row col 对应着最后的 P 里面的index，也就对应着 M N 里面的Row Col
+  // row col of output matrix / input M, N matrix
   int Row = by * TILE_WIDTH + ty;
   int Col = bx * TILE_WIDTH + tx;
   float Pvalue = 0;
 
-    // 一个thread block负责多个tile block
+  // iterate through all M & N tile for one output tile 
+  // (e.g in above figure, first dark blue tile, then orange tile)
   for ( int q = 0; q < width / TILD_WIDTH; ++q )
   {
-    // load data to shared memory
+    // load global memory to shared memory of one pair of M, N tile
+    // coarlesed global memory read for M & N
+    // conflict free shared memory write for M & N
     subTileM[ty][tx] = M[Row * width + q * TILE_WIDTH + tx];
-    subTileN[ty][tx] = N[(q * TILE_WIDTH+ty)*Width+Col];
+    subTileN[ty][tx] = N[(q * TILE_WIDTH + ty) * width + Col];
 
-    // barrier, wait for all threads load finish
+    // ensure all thread load finish
     __syncthreads();
 
-    // This part require data loaded by other threads
+    // each thread block in charge of one output tile
+    // each thread in charge of one output element
     for ( int k = 0; k < TILE_WIDTH; ++k )
+    {
+      // all threads in warp access same value of M
+      // all threads in warp access contigious (conflict free) element of N
+      // CI比较低，从SMEM load 2个元素，进行一次FMA的计算。
       Pvalue += subTileM[ty][k] * subTileN[k][tx];
-
-    // barrier, wait for all threads load finish
+    }
+    
+    // ensure finish using shared memory of current M and N tile
+    // shared memory will be re-write at next for loop iteration
     __syncthreads();
   }
 
-  // write result
+  // write result to global memory
+  // coarlesed write to global memory
   P[Row*Width+Col] = Pvalue;
 }
 ```
 
 
 
-simple kernel 对应上面的case
+##### memory reuse分析
 
-```cpp
-__global__ void sharedABMultiply(float *a, float* b, float *c,int N)
-{
-    __shared__ float aTile[TILE_DIM][TILE_DIM],
-                     bTile[TILE_DIM][TILE_DIM];
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    float sum = 0.0f;
-    aTile[threadIdx.y][threadIdx.x] = a[row*TILE_DIM+threadIdx.x];
-    bTile[threadIdx.y][threadIdx.x] = b[threadIdx.y*N+col];
-    __syncthreads();
-    for (int i = 0; i < TILE_DIM; i++) {
-        sum += aTile[threadIdx.y][i]* bTile[i][threadIdx.x];
-    }
-    c[row*N+col] = sum;
-}
+<img src="Note.assets/Screen Shot 2022-08-21 at 11.33.47 AM.png" alt="Screen Shot 2022-08-21 at 11.33.47 AM" style="zoom:50%;" />
 
-```
+下面提到的memory reuse是对于减少了对global memory的读取，只从shared memory上读取
 
 
 
-* bandwidth 分析
+在对M和N使用shared memory进行tilning以后，each value of M is used TILE_WIDTH times
 
-16 * 16 tiles : 对于每一个从global memory读取的数据，复用16次。
+对于M来说，reuse来自负责one row of output tile 的 threads在每个iteration 的时候访问相同的shared memory location（下图重叠的不同颜色的点）（output tile one row对应着tile M one row）。对于output tile/tile N来说，有多少个column，在M上重叠的点就会有多少个，就会reuse多少次（下图中标注N col=3，在M上重叠的的点有三个）。对于M的reuse是U(上图中的dim)。
 
-可以做到150 GB/s / 4B/FLOP * 6 = 600 GFLOP/s
+every element in output row use all element of corresbonding row in M + use M from left to right = every element of M is reused number of col of output tile times
 
-32 * 32 tiles ： 对于每一个从global memory读取的数据，复用32次。
-
-可以做到150 / 4 * 32 = 1200 GFLOPS > 1000 GFLOPS
-
-内存带宽不再是限制。
+需要注意的是，thread对M elem的映射是row major ordered的，也就是one row of M会对应相同的warp。如果U <= 32, 那么对于M的reuse是warp内的thread访问相同的M 数据，会使用broadcast，对shared memory只访问一次。如果U > 32，那么对于M的reuse是两个warp访问相同的M数据，会对shared memory进行两次访问，每个warp内部进行broadcast。
 
 
 
-* bank 分析
+对于N来说，reuse来自于负责不同row of output tile在每个iteration的时候使用same row of N。下图中两个output tile row在同一个iteration的时候，使用相同的row of N. 有多少个row of M / row of output tile，也就会对one row of N的数据复用几次。对M的reuse是T（上图中的dim）
 
-注意，尽管这里shared memory B是 `[32][32]` ，但是对于shared memory的访问是stride1的，每个warp负责one row （而不是每个thread in one warp负责one row)，所以不存在bank conflict
-
-
-
-* memory coarlesed 分析
-
-下面的例子中，每个thread沿着黑色的箭头访问4个元素。对于N的访问中每个thread访问一个column。对于M的访问中每个thread访问一个row。数据是row major order的
+因为负责计算different output tile row的threads会是在不同的warp中，所以对于N的访问都需要访问shared memory，有一定程度会被cache，但是cache复用的次数有限。
 
 
 
-对于N的访问：
-
-是coarlesed的
-
-在step1中4个thread访问的内存（N00,N01,N02,N03，黄色的部分) 在virtual memory中是连续的（在物理内存上会被分配到多个bank，多个channel中）
-
-在step2中，访问新的连续的内存。
-
-<img src="Note.assets/Screen Shot 2022-05-31 at 12.09.35 AM.png" alt="Screen Shot 2022-05-31 at 12.09.35 AM" style="zoom:50%;" />
+对于每个thread来说，每个访问的shared memory element只会使用一次。也就是memory reuse 100%来自于数据被不同的thread使用，而不是被thread内部使用多次。
 
 
 
-对于M的访问：
+Naive的方法上，总共需要从global memory读取 ( M_height * N_width ) * ( M_width + N_height) 个元素。一共有( M_height * N_width ) 个thread，每个thread读取(M_width + N_height) 个元素
 
-不是coalesced的
+当使用了shared memory以后，总共需要从global memory读取 (M_width/S) * ( S * T + S * U ) * (M_height / T) * (N_width / U).  总共有(M_height / T) * (N_width / U)个thread block，每个thread block会读取(M_width/S) * ( S * T + S * U )的global memory. 每个thread block有T * U个thread
 
-每个thread读取的数据都会导致一次memory burst。
+当使用shared memory的时候，每个thread读取2 * S个数据从shared memory中，一个thread block对shared memory读取T * U * 2 * S个元素（注意，这里没有考虑broadcast，cache，warp level memory access的影响）。
 
-Step1的4个value(M00,M10,M20,M30)需要4个burst(每个burst对应一个颜色)。由于burst buffer只有一个，在step 1访问结束后只有最后访问的burst依旧留在burst buffer中。
 
-step2的4个value访问(M01,M11,M21,M31)需要重新传送4个burst。
 
-<img src="Note.assets/Screen Shot 2022-05-31 at 12.10.24 AM.png" alt="Screen Shot 2022-05-31 at 12.10.24 AM" style="zoom:50%;" />
+##### Global memory coarlese & memory bank 分析
+
+global memory load是coarlesed的
+
+尽管这里shared memory B是 `[32][32]` ，但是对于shared memory的访问是stride1的，每个warp读取one row of N （而不是每个thread in one warp负责one row)，所以不存在bank conflict
+
+<img src="Note.assets/IMG_F31BF8462D2A-1.jpeg" alt="IMG_F31BF8462D2A-1" style="zoom:50%;" />
+
+
+
+##### double buffer
+
+通过使用两个shared memory buffer的方式，对于一个buffer来load数据，同时在另一个buffer上进行计算。
+
+可以减少syncthread带来的等待，上面syncthread需要等待从global memory load完数据后，synchthread，才可以使用这部分数据。现在因为数据是上一步load好的，所以减少了syncthread使用和等待时间。
+
+<img src="Note.assets/v2-bf58cbda60ee4eed6fcd03ca6a3fe35e_1440w.jpg" alt="img" style="zoom:70%;" />
+
+
+
+#### Tiling block dim
+
+> Reference
+>
+> 1. UIUC ECE 508 Lecture 4
+
+
+
+* square output thread block & none-square input thread block
+
+上面的例子分析了
+
+对于M的reuse，因为threads inside warp在每一个iteration的时候，访问同一个element
+
+对于N的reuse，因为different warp在每一个iteration的时候，使用的memory element是相同的
+
+
+
+达到同样的memory reuse比例，并不一定需要square memoty tile for M & N （黄色部分）, 只需要load one col of M & one row of N（圈出来的黄色部分）
+
+<img src="Note.assets/Screen Shot 2022-08-18 at 3.54.17 PM.png" alt="Screen Shot 2022-08-18 at 3.54.17 PM" style="zoom:50%;" />
+
+
+
+tile M : S * T
+
+tile N : T * S
+
+T一般是16/32
+
+S 是一个tunning factor
+
+每次load完tile M & tile N以后，需要进行syncthread。如果S太小，每次load T+U的数据，会导致syncthread经常发生，perf下降
+
+如果S太小，会导致load tile M effective bandwidth下降。
+
+<img src="Note.assets/Screen Shot 2022-08-18 at 3.55.13 PM.png" alt="Screen Shot 2022-08-18 at 3.55.13 PM" style="zoom:50%;" />
+
+
+
+* none-square output thread block 
+
+output block不一定非得是square的
+
+<img src="Note.assets/Screen Shot 2022-08-21 at 10.53.35 AM.png" alt="Screen Shot 2022-08-21 at 10.53.35 AM" style="zoom:50%;" />
 
 
 
@@ -1096,9 +1167,80 @@ __global__ void SquareMatrixKernel1( float* d_M, float* d_N, float* d_P, int wid
 
 
 #### Joint register and shared memory tiling
-> Volkov and Demmel SC 08
+> Reference
+>
+> 1. Volkov and Demmel SC 08
+> 2. UIUC ECE 508 lecture 4
 
-一个dim进行register tiling。一个dim进行shared memory tiling
+
+
+下面选择把M的数据放在register中，把output P也放在register中，把input N放在shared memory中。
+
+
+
+##### thread load M into registers
+
+在不使用joint tilning的时候，总共有T * U thread，每个thread读取one row of M & one row of N。一个warp内全部的thread在同iteration会读取相同的shared M element，多个warp在同iteration访问相同的warp level memory access
+
+需要注意的是，M的数据现在是private to each thread的，所以需要把row of M (of length S，下图中的圆框）放到一个thread的register中。下图中one row of M是放在一个thread中。
+
+需要注意的是，现在一个thread读取M的一个row，对于warp level来说对global memory的访问是不coarlesed的。需要对M matrix进行transpose，才能warp level coarlesed的
+
+所以处理T * U element，需要T thread，每个thread负责计算output tile中的one row （U element）
+
+当U>1的时候，进行thread coarsening，每个thread负责U element of value in P的计算，也需要U registers to accumulate partial sum. 注意的是当accumulate partial sum的时候，使用的是register，不是shared memory。
+
+总共需要的registers per thread是 U (for partial sum) + S (for reuse of M) （当不考虑读取shared memory的tmp register时）
+
+下面的例子里，选择put M into registers
+
+<img src="Note.assets/Screen Shot 2022-08-21 at 11.23.12 AM.png" alt="Screen Shot 2022-08-21 at 11.23.12 AM" style="zoom:50%;" />
+
+
+
+##### thread load N into registers
+
+如果选择把N中的数据放到registers中，那么one col of N (of length S)会被one thread load into registers。
+
+与把M放到register相比，把N放到register的时候，warp level对于global memory的访问是coarlesed的。在同一个时间，多个thread读取one row of N，只要让U是8/16/32/64的话(cc不是128 bytes coarlesed的，而是32 bytes coarlesed的)，就是coarlesed的
+
+现在处理T * U的数据，需要U threads，每个thread负责计算output tile中的one col。
+
+
+
+##### choose dim
+
+一般GPU有10s registers per thread, 当选择tile M for register的时候，需要S+U个register。选择U=16。U不能选择的过大，否则会导致register pressure。如果M使用shared memory的时候，选择U一般是32
+
+为了让joint tilning output tile size的总面积与shared memory output tile size差不多，选择T=64来平衡U比较小。
+
+每次进行的计算是U * T * S
+
+每个thread负责计算U*S inner product，需要U\*S不要太小，因为每次计算前后都需要syncthread
+
+
+
+##### thread load N into shared memory
+
+一共有T=64个thread，每次load U=16*S num of N into shared memory
+
+当S=1的时候，1/4 thread load value N into shared memory (some idle thread), requires S=1+U=16 registers per thread
+
+当S=4的时候，all thread load value N into shared memory (no idle thread), requires S=4+U=16 registers per thread
+
+
+
+##### thread use N from shared memory
+
+一共有T个thread，每个thread负责计算one output row of tile P, 每个thread有S element from one row of tile M, 每个thread需要在每个iteration中从shared memory N中读取one row of U个元素（threads in block在同一个iteration的时候，读取相同的U个元素。按照从左到右读取的时候, threads within warp会进行broadcast），一共进行S个iteration，每个iteration中进行多个FFMA操作
+
+
+
+<img src="Note.assets/IMG_402116F738FB-1.jpeg" alt="IMG_402116F738FB-1" style="zoom:30%;" />
+
+
+
+##### 总结
 
 <img src="Note.assets/Screen Shot 2022-06-06 at 6.32.38 PM.png" alt="Screen Shot 2022-06-06 at 6.32.38 PM" style="zoom:70%;" />
 
@@ -1132,6 +1274,14 @@ __global__ void SquareMatrixKernel1( float* d_M, float* d_N, float* d_P, int wid
 
 
 
+使用register进行tilining的目的
+
+1. 减少shared memory pressure，从而允许更多block per SM，从而允许更好的hide latency 
+2. 充分利用register资源，让register不会idle
+3. register的latency & bandwidth比shared memory要小（但是需要等待N读取shared memory，不知道是否依旧有效）
+
+
+
 #### Thread granularity
 
 reuse tile from matrix M for multipel tile N
@@ -1143,6 +1293,64 @@ reuse tile from matrix M for multipel tile N
 `DenseLinearAlgebra-CommunicationLowerBound.md::GEMM-UIUC` 没有考虑这个部分。
 
 <img src="Note.assets/Screen Shot 2022-05-31 at 7.07.46 PM.png" alt="Screen Shot 2022-05-31 at 7.07.46 PM" style="zoom:50%;" />
+
+
+
+#### Thread coarsening on shared memory tiling
+
+> Reference
+>
+> 1. zhihu 有了琦琦的棍子 深入浅出GPU优化系列
+
+
+
+* 是什么
+
+上面提到的使用shared memory tiling，对于shared memory的CI依旧很低，每次分别从MSMEM 和NSMEM 各load 1个元素，进行一次FMA计算，这样的CI是1/2。下图左边一个thread负责一个蓝色的点，每次读取一个黄色的和一个橙色的，计算一次FMA。
+
+thread coarsening的时候，一个thread负责rm * rn个output element of P，每次load rm个MSMEM和rn个NSMEM，进行rm * rn次FMA计算，这样的CI是rm*rn/(rm + rn)，提升了CI。理解为现在每次load SMEM数据后，更加充分的使用了这个数据。
+
+但是需要注意，并不是rm rn越大越好。number of register / thread, number of register / sm 是有限的，过度增加rm rn的大小会导致register per thread数量增加，导致register pressure
+
+
+
+* resource pressure
+
+没有减少对shared memory的使用，增加了register per thread的压力，可能产生shared memory bank conflict, 但是减少了total number of thread
+
+
+
+* 是什么
+
+<img src="Note.assets/v2-09215423d4c157b13486945a37614319_1440w.jpg" alt="img" style="zoom:70%;" />
+
+整体算法基于shared memory tilning，当处理某一个shared memory tile pair的时候，把对应的M N shared matrix tile再切分为多个rm * rn的小块，每个块由一个thread负责计算，thread首先把所需要的shared memory load into register. 
+
+
+
+##### maximize occupancy config
+
+> Reference
+>
+> 1. 旷视 CUDA 矩阵乘法终极优化指南 - 知乎
+
+
+
+==TODO 增加，还需要学习cuda occupancy calculator使用==
+
+
+
+在v100上，为了最大化occupancy，选择thread block size和data block size
+
+
+
+* 128 * 128 data block size, 128 thread block size
+
+
+
+* 128 * 128 data block size, 256 thread block size
+
+
 
 
 
@@ -1982,7 +2190,7 @@ __global__ void histogram_privatized_kernel(unsigned char* input, unsigned int* 
 > 1. UIUC 408 Lecture 17
 > 2. Optimizing parallel reduction in cuda by Mark Harris [link](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf)
 > 3. Faster Parallel Reductions on Kepler NVIDIA Blog [link](https://developer.nvidia.com/blog/faster-parallel-reductions-kepler/)
-> 4. Professional CUDA C Programming Guide chapter 3
+> 4. Professional CUDA C Programming Guide chapter 3, 5
 > 5. Stackoverflow CUDA algorithm cascading [link](https://stackoverflow.com/questions/23232782/cuda-algorithm-cascading)
 
 

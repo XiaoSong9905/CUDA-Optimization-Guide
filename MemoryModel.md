@@ -98,9 +98,13 @@ cudaEventRecord( stop, 0 );
 cudaEventSynchronize( stop );
 
 // compute time
-cudaEventElapsedTime( &time, start, stop );
+float milliseconds;
+cudaEventElapsedTime( &milliseconds, start, stop );
 cudaEventDestroy( start );
 cudaEventDestroy( stop );
+
+// bandwidth = bytes data / 1e6 / millisecond
+// 			     = bytes data / 1e9 / second
 ```
 
 
@@ -119,6 +123,16 @@ $$
 $$
 
 
+
+```cpp
+cudaDeviceProp dev_prop;
+CUDA_CHECK( cudaGetDeviceProperties( &dev_prop, dev_id ) );
+printf("global memory bandwidth %f GB/s\n", 2.0 * dev_prop.memoryClockRate * ( dev_prop.memoryBusWidth / 8 ) / 1e6 );
+```
+
+
+
+
 * GDDR
 
 enable ECC的GDDR内存因为有ECC overhead会导致theoretical bandwidth降低
@@ -132,6 +146,8 @@ HBM2因为有专门给ECC的部分，所以没有ECC overhead
 $$
 ((B_r + B_w) / 10^9 ) / time
 $$
+
+$10^9 = 1024 * 1024 * 1024$ 是用于把bytes转化为GB的
 
 
 
@@ -287,8 +303,7 @@ modern Double data rate （DDR） bus可以传输two word of data in each clock 
 > 7. CUDA C++ Programing Guide chapter K.3
 > 8. CUDA C++ Programming Guide chapter 3.2.2
 > 9. CUDA C++ Programming Guide chapter 5.3.2
-> 10. NVIDIA Tech Blog Cache behavior when loading global data to shared memory in Fermi [link]
-> 11. NVIDIA Tech Blog Coalesed Transaction Size [link](https://forums.developer.nvidia.com/t/coalesced-transaction-size/24602)
+> 10. NVIDIA Tech Blog Cache behavior when loading global data to shared memory in Fermi
 
 
 
@@ -478,7 +493,7 @@ threads in a warp request 32 four-byte addresses scattered across global memory.
 
 performend at granularity of 32 bytes memory segments
 
-Memory transactions can be one, two, or four segments at a time. 注意这里是说一次memory transaction是one segment long / two segment long / four segment long. 尽管是four segment long 但是依旧是one memory transaction. 
+Memory transactions can be one, two, or four segments at a time. 注意这里是说一次memory transaction是one segment long / two segment long / four segment long. 尽管是four segment long 但是依旧是one memory transaction.  32 bytes只是segment的大小，并不是memory transaction的大小
 
 
 
@@ -518,7 +533,7 @@ L1 cache line size 128 bytes
 
 L2 cache line size 32 bytes
 
-当使用L2 cache only的时候，memory transaction是32 bytesEach memory transaction may be conducted by one, two, or four 32 bytes segments。可以减少over-fecth
+当使用L2 cache only的时候，memory transaction是32 bytes. Each memory transaction may be conducted by one, two, or four 32 bytes segments。可以减少over-fecth
 
 当使用L1 + L2 cache的时候，memory transaction是128 bytes. Memory request 首先会去L1，如果L1 miss会去L2，如果L2 miss会去DRAM。
 
@@ -530,7 +545,7 @@ memory transaction在使用L1+L2 / L2 only的时候，与 Fermi 一样
 
 ##### CC 5.x Maxwell
 
-5.x default使用L2 cache，行为与3.x使用L2 cache only一样，是32 bytes transaction
+5.x default使用L2 cache，行为与3.x使用L2 cache 一样，是32 bytes transaction
 
 5.x 可以使用read only texture cache，是32 bytes transaction
 
@@ -684,6 +699,14 @@ global memory -> cache (optional L1)L2 -> per thread register -> shared memory
 
 
 
+* use shared memory for computation
+
+使用shared memory进行计算的时候，首先从shared memory读取数据，放到tmp register上，然后在register上进行计算，最终再把结果从register放到对应目的地。
+
+需要注意的是，使用shared memory中的数据进行计算的话，需要负担从shared memory到register的latency
+
+
+
 * 测试shared memory对occupancy的影响
 
 By simply increasing this parameter (without modifying the kernel), it is possible to effectively reduce the occupancy of the kernel and measure its effect on performance.
@@ -811,7 +834,7 @@ shared memory bank width: defines which shared memory addresses are in which sha
 
 
 
-##### Fermi 2.x (and all cc except 3,x)
+##### Fermi 2.x (and all cc except 3.x Kepler Arch)
 
 For a Fermi (2.x) device, the bank width is 32-bits and there are 32 banks. Each bank has a bandwidth of 32 bits per two clock cycles. Successive 32-bit words map to successive banks. (also apply for none 3.x device, only differ in number of clock cycle per transaction)
 
@@ -821,7 +844,7 @@ A bank conflict does not occur when two threads from the same warp access the sa
 
 Figure 5-5 上面是bytes address对应word indx。下面是word index对应bank index
 
-<img src="Note.assets/Screen Shot 2022-07-30 at 10.39.21 AM.png" alt="Screen Shot 2022-07-30 at 10.39.21 AM" style="zoom:50%;" />
+<img src="Note.assets/smem-array-idx-2-bank-idx.png" style="zoom:50%;" />
 
 
 
@@ -931,8 +954,6 @@ In the “load from global, store into shared, do quadratic computation on share
 shared memory is fast even if there are bank conflicts. Even with 16-way bank conflicts, shared memory is dozens of times faster than gobal memory. shared memory就算是有bank conflict也比global memory要快很多
 
 many people get too worried about bank conflicts. Optimize for bank conflicts last, especially if they are only 2- or 4-way conflicts, which may take more instructions to optimize away than they cost anyway.  有些时候为了避免shared memory bank conflict从而做了很多优化，但是由于额外的增加intrinsic，导致perf反而变差
-
-
 
 
 
@@ -1556,6 +1577,14 @@ compute capability 5.x and 6.x, local memory accesses are always cached in L2 in
 
 
 
+* 特点
+
+Register throughput >>> shared memory throughput (一个clock cycle, single thread可以访问多个register), low latency. 
+
+register must be load serially by each thread
+
+register tilning requires thread coarsening
+
 Registers 是 32 bit / 4 bytes 大小的 (same size as int / single precision float)。如果数据类型是double的话，则使用2个register。
 
 可以通过pack small data into a register (e.g. 2 short) and use bitmask + shift 来读取。从而减少register usage per thread
@@ -1581,6 +1610,18 @@ Register 也会有bank conflict，只不过这是完全由compiler处理的，pr
 ```shell
 -maxrregcount=N
 ```
+
+
+
+### Bank Conflict
+
+
+
+
+
+### Register Reuse
+
+
 
 
 
